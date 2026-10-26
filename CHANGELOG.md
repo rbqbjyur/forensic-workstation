@@ -4,6 +4,61 @@ Notable changes to `Update-ForensicWorkstation.ps1`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.0 - 2026-10-26
+
+0.1.3 can't check or install the Zimmerman tools since the vendor moved them
+to new download paths on 2026-10-24 (it reports them as "can't check");
+0.2.0 follows the move.
+
+### Added
+- Arsenal Image Mounter: the GUI and its CLI (`aim_cli`, `aim_pro`), with
+  the .NET Desktop Runtime 10, the Visual C++ Redistributable (x64) and
+  AIM's driver. The vendor ships the tool through MEGA, so you download the
+  zip into Downloads when the run asks; the script verifies it (vendor MD5,
+  signer) and installs it. The driver comes from Arsenal's package on
+  GitHub (git blob hash, signers checked) and is installed and updated with
+  their `aim_ll.exe`; the driver's Microsoft-signed catalogue is verified
+  by Windows' own verifier, with every driver file a member of it. Visual
+  C++ and the driver are never removed.
+
+### Removed
+- bstrings, rla, EZ Viewer and VSCMount from the catalogue: a full run
+  removes them from a workstation that has them (folders, PATH entries,
+  shortcuts).
+
+### Changed
+- The Zimmerman tools follow the vendor to .NET 10: they need the .NET
+  Desktop Runtime 10 line, and a full run removes the Desktop Runtime 9 line
+  the script installed for them.
+- AmcacheParser, SQLECmd, SrumECmd, SumECmd and WxTCmd get a `Temp`
+  folder the account may write to (their 2026.10 builds copy evidence
+  databases there); their folders stay protected and on the PATH.
+- The .NET check reads the runtimeconfig.json inside a single-file exe (the
+  2026.10 Zimmerman GUI tools); a .NET tool with none is refused.
+- Other platforms' SQLite libraries in AmcacheParser, WxTCmd and SQLECmd
+  are left out.
+- JumpList Explorer and SDB Explorer keep their settings (`Settings.xml`
+  beside the exe, writable by the account).
+- A dry run lists a Visual C++ Redistributable already installed as
+  "Check", not "Install".
+- Zimmerman versions are shown without their commit id (the records keep
+  it); a check line with a long name puts its outcome on the next line; a
+  result-block line names its tool once; a selective run without ancillary
+  content shows no empty section; an update section with nothing to do
+  says so ("Nothing to sync." for ancillary content); a version the script
+  didn't install is named once on its check line; Visual C++ versions are
+  shown in one form, and announced as "Checking" until its installer runs.
+- A result-block group with one tool names that tool.
+- Timeline Explorer's shortcuts sit directly on the Desktop and in the
+  Start Menu, outside "EZ Tools".
+- When a tool no longer in the catalogue keeps its PATH entry (it couldn't
+  be removed), the one PATH line says so, with its name.
+
+### Fixed
+- A run limited with `-Family` or `-Tool` no longer writes inventory.csv
+  without the prerequisite versions something else installed for tools
+  outside the selection.
+
 ## 0.1.3 - 2026-10-23
 
 First release. 0.1.0 to 0.1.2 were test builds only, never released.

@@ -164,12 +164,14 @@ Exit codes: 0 PASS, 1 WARN, 2 FAIL, 3 stopped before any work.
 
 | Family | Tools | Source |
 |---|---|---|
-| Zimmerman | GUI: EZ Viewer, JumpList Explorer, MFT Explorer, Registry Explorer, SDB Explorer, ShellBags Explorer, Timeline Explorer. CLI: AmcacheParser, AppCompatCacheParser, bstrings, EvtxECmd, JLECmd, LECmd, MFTECmd, PECmd, RBCmd, RecentFileCacheParser, RECmd, rla, SBECmd, SQLECmd, SrumECmd, SumECmd, VSCMount, WxTCmd | download.ericzimmermanstools.com |
+| Zimmerman | GUI: JumpList Explorer, MFT Explorer, Registry Explorer, SDB Explorer, ShellBags Explorer, Timeline Explorer. CLI: AmcacheParser, AppCompatCacheParser, EvtxECmd, JLECmd, LECmd, MFTECmd, PECmd, RBCmd, RecentFileCacheParser, RECmd, SBECmd, SQLECmd, SrumECmd, SumECmd, WxTCmd | download.ericzimmermanstools.com |
 | NirSoft | AppCompatibilityView, AppResourcesUsageView, FullEventLogView, JumpListsView, OfflineRegistryFinder, OfflineRegistryView, RecentFilesView, ShellBagsView, ShortcutsMan, USBDeview, UserAssistView, WinPrefetchView | nirsoft.net |
 | Sysinternals | Autoruns (and autorunsc), Disk2vhd, Process Explorer | download.sysinternals.com |
+| Arsenal | Arsenal Image Mounter (GUI, and `aim_cli`, `aim_pro`) | arsenalrecon.com: version and MD5; the zip downloaded by hand (MEGA) |
 
 Zimmerman tools are those of the vendor's "Forensic tools" section with a
-build on a current .NET line; Hasher (.NET Framework only) is not included. A
+build on a current .NET line, all .NET 10 today; Hasher, bstrings, rla, EZ
+Viewer and VSCMount are not included. A
 tool the vendor adds is reported as available, not installed, until it is in
 the catalogue. Five of the NirSoft tools have no x64 build and are installed
 as x86.
@@ -181,6 +183,19 @@ as x86.
 
 A runtime version something else installed is used, and listed in the
 inventory as not installed by the script; it is never removed.
+
+**Arsenal Image Mounter** is installed like the others, except that you
+download it: its vendor ships it through MEGA. When an install or update is
+due, the run says which zip to download from the vendor's downloads page
+into your Downloads folder; the next run checks it against the vendor's MD5
+and signer and installs the GUI (a Desktop shortcut) and the command-line
+`aim_cli` and `aim_pro` (on the PATH), with the .NET Desktop Runtime 10, the
+Visual C++ Redistributable (x64) and AIM's driver (Arsenal's package from
+GitHub: its catalogue must be signed by Microsoft's hardware compatibility
+publisher and name every driver file, verified by Windows' own verifier,
+then installed with their `aim_ll.exe`). Visual C++ and the driver are
+kept current and never removed: other programs share Visual C++, and
+removing the driver needs a restart.
 
 ## Where things go
 
@@ -197,8 +212,11 @@ the PATH that a standard process could write to would let it replace a binary
 that later runs elevated. The account may write only to the settings the
 tools save beside their exe, and nothing else in their folders: each NirSoft
 tool's `.cfg` file, Registry Explorer's `Bookmarks\User`, ShellBags
-Explorer's and Timeline Explorer's `Settings`. These are kept across updates
-and are not verified. Only the x64 builds of the Sysinternals tools are
+Explorer's and Timeline Explorer's `Settings`, JumpList Explorer's and SDB
+Explorer's `Settings.xml`, and the `Temp` folder where
+AmcacheParser, SQLECmd, SrumECmd, SumECmd and WxTCmd copy the databases
+they read. A tool folder on the PATH is never writable; only a subfolder
+of it may be. These are kept across updates and are not verified. Only the x64 builds of the Sysinternals tools are
 installed; autorunsc has a folder of its own, so `autorunsc64` is on the PATH
 and the Autoruns GUI is not.
 
@@ -232,7 +250,10 @@ anything else between runs beyond what `-Verify` finds.
 - It doesn't keep custom EvtxECmd or SQLECmd maps or RECmd batch files across
   a sync.
 - No scheduled runs, no Microsoft Defender exclusions and no self-update yet.
-- MemProcFS, Arsenal Image Mounter and KAPE are not in the catalogue.
+- It doesn't download Arsenal Image Mounter (you do; see the catalogue).
+- It never removes the Visual C++ Redistributable or AIM's driver; Windows'
+  driver store keeps each AIM driver package installed.
+- MemProcFS and KAPE are not in the catalogue.
 - arm64 Windows is not supported.
 
 ## Contributing
