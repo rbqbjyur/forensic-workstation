@@ -90,7 +90,7 @@ param(
 
 # ============================== CONFIG ==============================
 
-$WorkstationVersion = '0.2.0'
+$WorkstationVersion = '0.2.1'
 
 # No script-wide error suppression: every unit of work has its own try/catch.
 # Progress bars are off: Invoke-WebRequest in PowerShell 5.1 is many times
@@ -222,7 +222,7 @@ $Catalogue = @(
     [pscustomobject]@{ Name = 'MFTExplorer';       DisplayName = 'MFT Explorer';       Family = 'Zimmerman'; Source = 'EZTools'; Package = 'MFTExplorer.zip';       Gui = 'MFTExplorer.exe';       Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @() }
     [pscustomobject]@{ Name = 'RegistryExplorer';  DisplayName = 'Registry Explorer';  Family = 'Zimmerman'; Source = 'EZTools'; Package = 'RegistryExplorer.zip';  Gui = 'RegistryExplorer.exe';  Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @('Bookmarks\User') }
     [pscustomobject]@{ Name = 'SDBExplorer';       DisplayName = 'SDB Explorer';       Family = 'Zimmerman'; Source = 'EZTools'; Package = 'SDBExplorer.zip';       Gui = 'SDBExplorer.exe';       Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('Settings.xml') }
-    [pscustomobject]@{ Name = 'ShellBagsExplorer'; DisplayName = 'ShellBags Explorer'; Family = 'Zimmerman'; Source = 'EZTools'; Package = 'ShellBagsExplorer.zip'; Gui = 'ShellBagsExplorer.exe'; Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @('Settings') }
+    [pscustomobject]@{ Name = 'ShellBagsExplorer'; DisplayName = 'ShellBags Explorer'; Family = 'Zimmerman'; Source = 'EZTools'; Package = 'ShellBagsExplorer.zip'; Gui = 'ShellBagsExplorer.exe'; Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @('Settings', 'logs') }
     [pscustomobject]@{ Name = 'TimelineExplorer';  DisplayName = 'Timeline Explorer';  Family = 'Zimmerman'; Source = 'EZTools'; Package = 'TimelineExplorer.zip';  Gui = 'TimelineExplorer.exe';  Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @('Settings'); ShortcutOutsideFolder = $true }
     # Zimmerman: command-line tools (their .NET builds need the .NET Runtime of their line). Since 2026.10, five of them copy the
     # evidence databases they read into a Temp folder beside their exe (unless --temp is given): a writable subfolder
@@ -387,13 +387,23 @@ $CatalogueHashAlgorithms = @('SHA256', 'SHA1')
 # means for a catalogue member; one not listed is shown as its hex value.
 $WinVerifyTrustResultNames = @{
     '80092004' = 'CRYPT_E_NOT_FOUND: not a member of the catalogue'
-    '800B0100' = 'TRUST_E_NOSIGNATURE: the catalogue is not signed, or the file is not in it'
+    '800B0100' = 'TRUST_E_NOSIGNATURE: the file is not in the catalogue, or the catalogue''s signature does not verify'
+    '80092003' = 'CRYPT_E_FILE_ERROR: the catalogue can''t be read (damaged, or not a catalogue)'
     '80096010' = 'TRUST_E_BAD_DIGEST: the catalogue has been altered since it was signed'
     '800B0004' = 'TRUST_E_SUBJECT_NOT_TRUSTED: the catalogue is not trusted'
     '800B0101' = 'CERT_E_EXPIRED: a certificate in the catalogue signer''s chain has expired'
     '800B0109' = 'CERT_E_UNTRUSTEDROOT: the catalogue signer''s chain does not end in a trusted root'
     '800B010A' = 'CERT_E_CHAINING: the catalogue signer''s chain could not be built'
 }
+
+# --- Host ---
+# The OS architecture, by machine type (Win32_Processor.Architecture, a
+# number), as the run's header names it; the script runs only on X64.
+$ProcessorArchitectureNames = @{ 0 = 'X86'; 5 = 'Arm'; 9 = 'X64'; 12 = 'Arm64' }
+# The machine's own PROCESSOR_ARCHITECTURE (not the process's), the
+# fallback, and the names it maps to.
+$MachineEnvironmentKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+$ProcessorArchitectureRegistryNames = @{ 'AMD64' = 'X64'; 'ARM64' = 'Arm64'; 'x86' = 'X86' }
 
 # --- Records ---
 # Column names: part of the tool's contract once at 1.0 (AGENTS.md).
@@ -674,13 +684,24 @@ function Get-OsName {
     return $caption
 }
 
-# The OS architecture (X64, Arm64, ...), not the process's: an x64
-# PowerShell on ARM64 Windows still says AMD64 in PROCESSOR_ARCHITECTURE.
+# The OS architecture (X64, Arm64, ...), not the process's (an x64
+# PowerShell on ARM64 Windows has AMD64 in its own environment). From the
+# processor's machine type, else the machine's PROCESSOR_ARCHITECTURE in
+# the registry; an empty or unknown answer falls through to the next
+# source, and "unknown" when none answers. Not
+# [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture: at
+# an interactive prompt PSReadLine's own type of that name hides .NET's and
+# answers nothing.
 function Get-OsArchitecture {
-    try { return [string][System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture } catch {}
-    $architecture = Get-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name 'PROCESSOR_ARCHITECTURE'
-    if ($architecture -eq 'AMD64') { return 'X64' }
-    if ($architecture) { return $architecture }
+    try {
+        $processor = @(Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop) | Select-Object -First 1
+        if ($processor -and $null -ne $processor.Architecture -and $script:ProcessorArchitectureNames.ContainsKey([int]$processor.Architecture)) {
+            return $script:ProcessorArchitectureNames[[int]$processor.Architecture]
+        }
+    } catch {}
+    $registryArchitecture = [string](Get-RegistryValue -Path $script:MachineEnvironmentKey -Name 'PROCESSOR_ARCHITECTURE')
+    if ($registryArchitecture -and $script:ProcessorArchitectureRegistryNames.ContainsKey($registryArchitecture)) { return $script:ProcessorArchitectureRegistryNames[$registryArchitecture] }
+    if ($registryArchitecture) { return $registryArchitecture }
     return 'unknown'
 }
 
@@ -921,16 +942,23 @@ function Get-WinVerifyTrustResultName {
 
 # Whether a file is a member of a signed catalogue, by Windows' own verdict
 # (Add-CatalogueMemberType), with each hash algorithm the catalogue may use.
-# Returns Accepted and a description for the records.
+# Returns Accepted and a description for the records; a refusal reports the
+# first algorithm's result (SHA-256, the catalogues' own), and another
+# algorithm's only where it differs.
 function Test-CatalogueMember {
     param([string]$CataloguePath, [string]$MemberPath)
     Add-CatalogueMemberType
-    $lastResult = 0
+    $refusals = New-Object System.Collections.Generic.List[object]
     foreach ($algorithm in $script:CatalogueHashAlgorithms) {
-        $lastResult = [ForensicWorkstation.CatalogueMember]::Verify($CataloguePath, $MemberPath, $algorithm)
-        if ($lastResult -eq 0) { return [pscustomobject]@{ Accepted = $true; Description = "a member ($algorithm)" } }
+        $result = [ForensicWorkstation.CatalogueMember]::Verify($CataloguePath, $MemberPath, $algorithm)
+        if ($result -eq 0) { return [pscustomobject]@{ Accepted = $true; Description = "a member ($algorithm)" } }
+        $refusals.Add([pscustomobject]@{ Algorithm = $algorithm; Result = $result })
     }
-    return [pscustomobject]@{ Accepted = $false; Description = (Get-WinVerifyTrustResultName -Result $lastResult) }
+    $description = Get-WinVerifyTrustResultName -Result $refusals[0].Result
+    foreach ($other in @($refusals | Select-Object -Skip 1 | Where-Object { $_.Result -ne $refusals[0].Result })) {
+        $description += "; with $($other.Algorithm): $(Get-WinVerifyTrustResultName -Result $other.Result)"
+    }
+    return [pscustomobject]@{ Accepted = $false; Description = $description }
 }
 
 # --- Paths ---
@@ -1739,16 +1767,17 @@ function Install-PrerequisiteVersion {
 
 # The state record of a prerequisite updated in place: its marker, and the
 # one version this script installed (an earlier one it installed is gone,
-# replaced in place).
+# replaced in place). Signer: what was checked, where the download itself
+# carries no signature (the driver package); else the download's signer.
 function Set-InPlacePrerequisiteRecord {
-    param($Prerequisite, $Remote, $State, [string]$Version, $Download, [bool]$InstalledByScript)
+    param($Prerequisite, $Remote, $State, [string]$Version, $Download, [bool]$InstalledByScript, [string]$Signer = '')
     if (-not $State.Prerequisites.ContainsKey($Prerequisite.Id)) { $State.Prerequisites[$Prerequisite.Id] = @{ DisplayName = $Prerequisite.DisplayName; Versions = @{} } }
     $record = $State.Prerequisites[$Prerequisite.Id]
     $record.Marker = $Remote.Marker
     if (-not $InstalledByScript) { return }
     $record.Versions = @{
         $Version = @{ InstallerFile = ''; InstallerSha256 = $Download.Sha256; SourceUrl = $Remote.Url; VendorHashAlgorithm = $Remote.VendorHashAlgorithm
-            VendorHash = $Remote.VendorHash; VendorHashMatched = $Download.VendorHashMatched; Signer = $Download.Signer; InstalledUtc = (Format-UtcTime -Time (Get-Date)) }
+            VendorHash = $Remote.VendorHash; VendorHashMatched = $Download.VendorHashMatched; Signer = $(if ($Signer) { $Signer } else { $Download.Signer }); InstalledUtc = (Format-UtcTime -Time (Get-Date)) }
     }
 }
 
@@ -1844,7 +1873,8 @@ function Install-ArsenalDriver {
         try { Remove-OwnedFolder -Path $packageFolder -Root $script:stagingFolder } catch {}
         try { Remove-OwnedFile -Path $download.Path -Root $script:stagingFolder } catch {}
     }
-    Set-InPlacePrerequisiteRecord -Prerequisite $Prerequisite -Remote $Remote -State $State -Version $Remote.Version -Download $download -InstalledByScript $true
+    $checkedSigners = "$($script:ArsenalDriverCatalogue): $($signerDescriptions[$catalogue]); $(Split-Path -Leaf $script:ArsenalDriverInstaller): $($signerDescriptions[$installer])"
+    Set-InPlacePrerequisiteRecord -Prerequisite $Prerequisite -Remote $Remote -State $State -Version $Remote.Version -Download $download -InstalledByScript $true -Signer $checkedSigners
     return "$($Prerequisite.DisplayName) $($Remote.Version) installed (commit $($Remote.Marker.Substring(0, 12)))"
 }
 
@@ -2482,10 +2512,15 @@ function Get-InventoryLine {
     }
     foreach ($id in ($State.Prerequisites.Keys | Sort-Object)) {
         $prerequisiteRecord = $State.Prerequisites[$id]
+        # A .NET line's change marker is its version; a prerequisite updated
+        # in place keeps its own (the driver's commit, Visual C++'s file).
+        $changeMarker = [string]$prerequisiteRecord.Marker
         foreach ($version in ($prerequisiteRecord.Versions.Keys | Sort-Object)) {
             $versionRecord = $prerequisiteRecord.Versions[$version]
+            $versionMarker = $version
+            if ($changeMarker) { $versionMarker = $changeMarker }
             $lines.Add((ConvertTo-CsvLine -Cells @('Prerequisite', '', $prerequisiteRecord.DisplayName, $version, 'x64', 'yes', $versionRecord.SourceUrl, $versionRecord.InstallerSha256,
-                        $versionRecord.VendorHashAlgorithm, $versionRecord.VendorHash, $versionRecord.VendorHashMatched, $versionRecord.Signer, $version, $versionRecord.InstalledUtc, '')))
+                        $versionRecord.VendorHashAlgorithm, $versionRecord.VendorHash, $versionRecord.VendorHashMatched, $versionRecord.Signer, $versionMarker, $versionRecord.InstalledUtc, '')))
         }
     }
     foreach ($present in $script:prerequisitesNotOwned) {
@@ -2631,10 +2666,16 @@ function Write-ResultBlock {
     Write-ConsoleLine -Text ('=' * $script:ConsoleWidth)
     $verdictText = "RESULT: $overall - $Coverage"
     if ($script:useColour) {
-        Write-Host 'RESULT: ' -NoNewline
+        # Wrapped as the plain line is, then the verdict word coloured on
+        # the first line only.
+        $verdictPrefix = 'RESULT: '
+        $verdictLines = @(Format-WrappedText -Text $verdictText -Indent 0 -ContinuationIndent 2)
+        $firstLine = $verdictLines[0].Replace($script:UnbreakableSpace, ' ')
+        Write-Host $verdictPrefix -NoNewline
         Write-Host $overall -ForegroundColor (Get-StatusColour -Status $overall) -NoNewline
-        Write-Host " - $Coverage"
-        Add-LogLine -Text $verdictText
+        Write-Host $firstLine.Substring($verdictPrefix.Length + $overall.Length)
+        Add-LogLine -Text $firstLine
+        for ($index = 1; $index -lt $verdictLines.Count; $index++) { Write-RawLine -Text $verdictLines[$index] }
     } else {
         Write-ConsoleLine -Text $verdictText
     }

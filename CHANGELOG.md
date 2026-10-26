@@ -4,7 +4,37 @@ Notable changes to `Update-ForensicWorkstation.ps1`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.1 - 2026-10-26
+
+### Fixed
+- Typed at an interactive Windows PowerShell prompt (PSReadLine loaded),
+  the script no longer stops before any work with "this machine is ."; the
+  OS architecture is read from the processor's machine type, then the
+  registry.
+- The coloured verdict line in the console wraps at 80 columns like the
+  rest.
+- The driver's row in inventory.csv names what was checked (the package
+  catalogue's signer and `aim_ll.exe`'s) and its change marker is the
+  package's commit, as for the other prerequisites updated in place; a
+  workstation installed with 0.2.0 gets them at its next driver update.
+
+### Changed
+- The README shows a demo and pictures, says how to adapt the catalogue
+  ("Adapting it"), and lists `Arsenal` among `-Family`'s names.
+- ShellBags Explorer's `logs` folder (beside its exe, where it logs a hive's
+  transaction logs being applied) is writable by the account.
+- A driver file the catalogue check refuses is reported with the SHA-256
+  result (and the SHA-1 one only where it differs); the result names
+  include CRYPT_E_FILE_ERROR, and TRUST_E_NOSIGNATURE reads as what it
+  means.
+
 ## 0.2.0 - 2026-10-26
+
+Known issue: typed at an interactive Windows PowerShell prompt, where
+PSReadLine is loaded (the default), it stops before any work ("this script
+is for amd64 (x64) Windows; this machine is ."), changing nothing. Run it
+as `powershell.exe -NoProfile -File .\Update-ForensicWorkstation.ps1`, or
+use 0.2.1, which fixes it.
 
 0.1.3 can't check or install the Zimmerman tools since the vendor moved them
 to new download paths on 2026-10-24 (it reports them as "can't check");
@@ -60,6 +90,13 @@ to new download paths on 2026-10-24 (it reports them as "can't check");
   outside the selection.
 
 ## 0.1.3 - 2026-10-23
+
+Known issue: typed at an interactive Windows PowerShell prompt, where
+PSReadLine is loaded (the default), it stops before any work ("this script
+is for amd64 (x64) Windows; this machine is ."), changing nothing. Run it
+as `powershell.exe -NoProfile -File .\Update-ForensicWorkstation.ps1`, or
+use 0.2.1 (0.1.3 also can't update the Zimmerman tools since
+2026-10-24).
 
 First release. 0.1.0 to 0.1.2 were test builds only, never released.
 

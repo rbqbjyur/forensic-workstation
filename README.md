@@ -1,79 +1,28 @@
 # forensic-workstation
 
-A Windows PowerShell script that builds a forensic workstation from fresh and
-keeps it current: it installs the analysis tools and the prerequisites they
-need, downloads only what has changed since the last run, and removes what is
-no longer needed.
+My own set-up of the common Windows forensic tools, shared as it is: one
+Windows PowerShell script that installs them on a fresh DFIR workstation and
+keeps them current, downloading only what has changed since the last run and
+removing what is no longer needed.
 
-Built for the DFIR workstation that has to be ready before an incoming
-investigation: a fresh build, or a machine not started for a while. One run
-installs or updates Eric Zimmerman's tools (EZ Tools) with their EvtxECmd
-maps, RECmd batch files and SQLECmd maps, NirSoft's forensic utilities and
-Sysinternals tools, and the .NET runtimes they depend on. Every download is hashed and checked against the vendor's
-published hash and signer, and recorded, so the tool versions behind an
-analysis can be cited later.
+It isn't a forensic suite. It keeps the many small standalone tools up to
+date, so the workstation is ready before an investigation: Eric Zimmerman's
+tools (EZ Tools) with their EvtxECmd maps, RECmd batch files and SQLECmd
+maps, NirSoft's forensic utilities, Sysinternals tools and Arsenal Image
+Mounter with its driver, with the .NET runtimes and Visual C++
+Redistributable they need. Every download is hashed, checked against the
+vendor's published hash and signer, and recorded, so the tool versions
+behind an analysis can be cited later.
 
-A second run on a workstation that is already current (real output, names
-anonymised; the per-tool check lines shortened):
+The selection is mine. Use it as it is, or adapt it: adding or
+dropping a tool is a row in a table, and another vendor's set needs only a
+small function that finds its downloads (see [Adapting it](#adapting-it)).
 
-```
-================================================================================
-Forensic workstation update 0.1.3
-================================================================================
-Started    : 2026-10-23T05:52:31Z
-Host       : WORKSTATION
-OS         : Microsoft Windows 11 Enterprise 24H2 (X64)
-Account    : WORKSTATION\analyst (elevated)
-Mode       : update
-Selection  : every tool in the catalogue
-Script     : C:\Users\analyst\Downloads\Update-ForensicWorkstation.ps1
-SHA-256    : a1327cf33b6007d6122f5fb4a8012795f4670396368de57c534915e50e8f1618
-Tools      : C:\Program Files\ForensicTools
-Records    : C:\ProgramData\ForensicWorkstation
-Log        : C:\ProgramData\ForensicWorkstation\Runs\20261023T055231Z\run.log
+<img src="docs/images/demo.webp" alt="Console, 80 columns: .\Update-ForensicWorkstation.ps1 typed at a Windows PowerShell prompt; the header (version 0.2.1, host, OS, elevated account, the script's SHA-256, the tools and records folders, the log); Checking sources, each of the 39 tools, the driver, the Visual C++ Redistributable, the .NET Desktop Runtime 10 and the three ancillary sets current except EvtxECmd and USBDeview (update available) and the EvtxECmd maps (changed upstream); the plan (update EvtxECmd, update USBDeview, sync the EvtxECmd maps); both downloads with their SHA-256 and signer; the maps synced (475 files); nothing to remove; PATH and shortcuts unchanged; the records written; RESULT: PASS with every group PASS">
 
-Warnings found during the run are listed at the end, before the result.
-
---------------------------------------------------------------------------------
-Checking sources
-  EZViewer                 current
-                           (2026.5.0+1cdf49c9a34eaadf0414e454ded7495d420a5945)
-  JumpListExplorer         current
-                           (2026.5.0+13be9bd7e53ff0f33fe8ddf0279c0dc648d6ec54)
-  MFTExplorer              current
-  ...
-
-
---------------------------------------------------------------------------------
-Clean-up
-  Nothing to remove.
-
---------------------------------------------------------------------------------
-PATH and shortcuts
-  machine PATH already has every tool folder (19)
-  shortcuts: 0 made, 0 corrected, 44 unchanged, 0 removed
-
---------------------------------------------------------------------------------
-Records
-  state.json, inventory.csv (45 rows) and files.csv (1118 rows) written
-Inventory  : C:\ProgramData\ForensicWorkstation\inventory.csv
-Files      : C:\ProgramData\ForensicWorkstation\files.csv
-
-================================================================================
-RESULT: PASS - every tool in the catalogue, its prerequisites and ancillary
-  content
-================================================================================
-  PASS  Prerequisites: current (9.0.21)
-  PASS  Zimmerman: 25 of 25 PASS
-  PASS  NirSoft: 12 of 12 PASS
-  PASS  Sysinternals: 4 of 4 PASS
-  PASS  Ancillary content: 3 of 3 PASS
-  PASS  PATH and shortcuts: 2 of 2 PASS
-  PASS  Records: state.json, inventory.csv (45 rows) and files.csv (1118 rows)
-          written
-================================================================================
-Log: C:\ProgramData\ForensicWorkstation\Runs\20261023T055231Z\run.log
-```
+An update with two tools and the EvtxECmd maps due, typed at a Windows
+PowerShell prompt (in Windows Sandbox), in real time; the last frame is held
+for four seconds.
 
 ## Table of contents
 
@@ -81,6 +30,7 @@ Log: C:\ProgramData\ForensicWorkstation\Runs\20261023T055231Z\run.log
 - [Install](#install)
 - [Usage](#usage)
 - [The catalogue](#the-catalogue)
+- [Adapting it](#adapting-it)
 - [Where things go](#where-things-go)
 - [What the output shows](#what-the-output-shows)
 - [What it does not do](#what-it-does-not-do)
@@ -104,13 +54,16 @@ Log: C:\ProgramData\ForensicWorkstation\Runs\20261023T055231Z\run.log
   `--sync` when it has changed. Files retired upstream are removed (`--sync`
   alone keeps them).
 - Verifies every download: SHA-256, the vendor's published hash where there
-  is one (.NET), the Authenticode signer of every exe it installs, and a
+  is one (.NET, Arsenal Image Mounter, the Visual C++ Redistributable, AIM's
+  driver package), the Authenticode signer of every exe it installs, AIM's
+  driver against its Microsoft-signed catalogue, and a
   re-read of every extracted file before it is used. An update is swapped in
   only when all of that passes; a tool running from its folder is left as it
   is.
 - Puts command-line tools on the machine PATH, so they run by name from any
   terminal, and GUI tools on the Desktop and in the Start Menu, in a folder
-  per family.
+  per family with several (Timeline Explorer and Arsenal Image Mounter
+  directly).
 - Removes what it installed and no longer needs: tools dropped from the
   catalogue, superseded prerequisite versions, runtime lines no tool needs.
   It never removes anything it didn't install.
@@ -132,7 +85,8 @@ Unblock-File .\Update-ForensicWorkstation.ps1
   Windows 11 24H2; not tested on Windows 10.
 - An elevated prompt for an update; `-CheckOnly` and `-Verify` run without.
 - Internet access to the vendors' download sites, GitHub (the maps) and
-  Microsoft's .NET release metadata, through the account's system proxy settings.
+  Microsoft's .NET release metadata, through the account's system proxy
+  settings.
 
 ## Usage
 
@@ -155,7 +109,7 @@ Unblock-File .\Update-ForensicWorkstation.ps1
 |---|---|
 | `-CheckOnly` | The dry run: every source is checked and every action an update would take is listed; nothing changes. `-WhatIf` does the same. |
 | `-Verify` | Re-hashes the installed files against `files.csv` and lists files missing, changed or not on record. No network access. |
-| `-Family` | Limits the run to these families: `Zimmerman`, `NirSoft`, `Sysinternals`. |
+| `-Family` | Limits the run to these families: `Zimmerman`, `NirSoft`, `Sysinternals`, `Arsenal`. |
 | `-Tool` | Limits the run to these tools (names as in the catalogue). |
 
 Exit codes: 0 PASS, 1 WARN, 2 FAIL, 3 stopped before any work.
@@ -197,13 +151,33 @@ then installed with their `aim_ll.exe`). Visual C++ and the driver are
 kept current and never removed: other programs share Visual C++, and
 removing the driver needs a restart.
 
+## Adapting it
+
+Everything specific to a tool or vendor sits in tables at the top of the
+script (CONFIG), each field documented beside it; the rest is shared.
+
+| To | Change |
+|---|---|
+| Add a Zimmerman tool left out | Take its zip out of `$EzOutOfScope` and add a `$Catalogue` row, copied from a similar tool's |
+| Drop a tool | Remove its `$Catalogue` row: the next full run removes it from the workstation, with its PATH entry and shortcuts |
+| Add a NirSoft tool | A `$Catalogue` row; `Package` is the name in its PAD and zip URLs, the x64 build is picked when there is one (`$NirSoftBuilds`) |
+| Add a Sysinternals tool | A `$Catalogue` row; `Package` is the zip's name, `Files` its x64 files, `EulaKeys` its key under `HKCU\Software\Sysinternals` |
+| Add another vendor's set | A `$Families` row (its signer), its `$Catalogue` rows, and a source adapter: a function `Get-<Source>Remote` that returns `New-Remote` (where the current file is, a change marker, the vendor's hash if it publishes one), with its line in `Get-ToolRemote` |
+| Add a .NET runtime flavour, or maps synced like EvtxECmd's | A row of `$DotNetFlavours` or `$AncillaryContent` |
+
+An adapter only says what is current and where to get it. Downloading, the
+hash and signer checks, extraction, the install and swap, PATH, shortcuts,
+writable folders, clean-up and the records are shared by every source.
+`Get-SysinternalsRemote`, seven lines, is the simplest adapter to start
+from.
+
 ## Where things go
 
 | What | Where |
 |---|---|
 | Tools | `%ProgramFiles%\ForensicTools\<Family>\<Tool>\` |
 | CLI tools | each one's folder on the machine PATH |
-| GUI shortcuts | Desktop and Start Menu, in a folder per family (`EZ Tools`, `NirSoft`, `Sysinternals`) |
+| GUI shortcuts | Desktop and Start Menu, in a folder per family (`EZ Tools`, `NirSoft`, `Sysinternals`); Timeline Explorer and Arsenal Image Mounter directly |
 | Records | `%ProgramData%\ForensicWorkstation\`, writable by administrators only |
 | Kept installers | `%ProgramData%\ForensicWorkstation\Installers\`, for a later uninstall |
 
@@ -212,13 +186,19 @@ the PATH that a standard process could write to would let it replace a binary
 that later runs elevated. The account may write only to the settings the
 tools save beside their exe, and nothing else in their folders: each NirSoft
 tool's `.cfg` file, Registry Explorer's `Bookmarks\User`, ShellBags
-Explorer's and Timeline Explorer's `Settings`, JumpList Explorer's and SDB
-Explorer's `Settings.xml`, and the `Temp` folder where
+Explorer's and Timeline Explorer's `Settings`, ShellBags Explorer's `logs`,
+JumpList Explorer's and SDB Explorer's `Settings.xml`, and the `Temp` folder
+where
 AmcacheParser, SQLECmd, SrumECmd, SumECmd and WxTCmd copy the databases
 they read. A tool folder on the PATH is never writable; only a subfolder
-of it may be. These are kept across updates and are not verified. Only the x64 builds of the Sysinternals tools are
-installed; autorunsc has a folder of its own, so `autorunsc64` is on the PATH
-and the Autoruns GUI is not.
+of it may be. These are kept across updates and are not verified. Only the
+x64 builds of the Sysinternals tools are installed; autorunsc has a folder of
+its own, so `autorunsc64` is on the PATH and the Autoruns GUI is not.
+
+<img src="docs/images/desktop.webp" alt="The Desktop's icons: Recycle Bin, Microsoft Edge, the folders EZ Tools, NirSoft and Sysinternals, and the shortcuts Arsenal Image Mounter and Timeline Explorer">
+
+*The Desktop after a fresh build: a folder per family, the two tools used
+with every family directly.*
 
 ## What the output shows
 
@@ -232,11 +212,19 @@ update also writes, at the records folder's root and in the run's folder:
 | `files.csv` | The SHA-256 of every file the script installed, vendor files and synced content apart |
 | `state.json` | What the script installed and owns (what clean-up may remove) |
 
+<img src="docs/images/inventory.webp" alt="Timeline Explorer with inventory.csv open: 45 lines, the columns Kind, Family, Name, Version, Build and Owned, one row per tool (AimCli, AmcacheParser, AppCompatCacheParser, AppCompatibilityView and the others), each owned by the script">
+
+*`inventory.csv` in Timeline Explorer (first columns).*
+
 Records are UTF-8 without BOM, CRLF, every CSV cell quoted. The console ends
 with a result block: PASS (current and verified), WARN (an update not applied,
 a source that couldn't be checked, a tool in use, a runtime past its end of
 support), FAIL (an install or a check that failed), per family and for
 prerequisites, ancillary content, PATH and shortcuts, clean-up and records.
+
+<img src="docs/images/end-of-update.webp" alt="Console: the result block of an update, RESULT: PASS for every tool in the catalogue, its prerequisites and ancillary content, then Prerequisites 3 of 3, Zimmerman 21 of 21, NirSoft 12 of 12, Sysinternals 4 of 4, Arsenal 2 of 2, Ancillary content 3 of 3, PATH and shortcuts 2 of 2 PASS, the records written, and the log's location">
+
+*The result block: the verdict and each group.*
 
 The records show what was installed, from where, with which hashes, and when,
 and `-Verify` shows whether the files are still those bytes. They don't show
@@ -245,6 +233,8 @@ anything else between runs beyond what `-Verify` finds.
 
 ## What it does not do
 
+- It isn't a forensic suite: it installs and updates a chosen set of
+  standalone tools, and nothing it doesn't list.
 - It installs nothing for other accounts on the machine: per-user items
   (shortcuts, the Sysinternals EULA) are for the account that runs it.
 - It doesn't keep custom EvtxECmd or SQLECmd maps or RECmd batch files across
@@ -260,10 +250,7 @@ anything else between runs beyond what `-Verify` finds.
 
 Questions and bug reports: GitHub issues. Pull requests are welcome.
 
-Adding a tool is adding a row to `$Catalogue` (its fields are documented
-beside it); a new source is an adapter function (`Get-<Source>Remote`) and a
-line in `Get-ToolRemote`. .NET runtime flavours are rows of `$DotNetFlavours`;
-ancillary content is a row of `$AncillaryContent`.
+Adding tools and sources: see [Adapting it](#adapting-it).
 Code: Windows PowerShell 5.1, no modules, PSScriptAnalyzer-clean, ASCII.
 
 ## Licence
