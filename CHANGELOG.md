@@ -4,6 +4,73 @@ Notable changes to `Update-ForensicWorkstation.ps1`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.0 - 2026-10-27
+
+### Added
+- `-Category`: a run limited to the tools of one or more categories, as
+  `-Family` and `-Tool` limit it. A name may be given without its spaces.
+- TurnedOnTimesView and UserProfilesView (NirSoft, 32-bit builds), and
+  SRUM-DUMP (GitHub releases; unsigned, checked against GitHub's SHA-256
+  digest) as a GUI tool and as the command-line `srum_dump` on the PATH.
+- A download that is the tool itself (one exe, not a zip) is installed as
+  it is.
+- A selection may be given as one comma-separated string
+  (`-Family "Zimmerman,NirSoft"`), as a shortcut or `-File` passes it.
+- A copy of the script under `%ProgramFiles%\ForensicTools\`, with the
+  shortcut "Update forensic workstation" on the Desktop and in the Start
+  Menu, which asks for administrator rights (UAC) and runs that copy. The
+  first update run from anywhere (Downloads) installs them.
+- An update run started without administrator rights runs itself again
+  elevated (UAC asks), in its own window kept open at the end; before, it
+  stopped. A relaunched run that still has no administrator rights (UAC
+  off for a filtered account) stops rather than relaunching again.
+- Self-update: an update run installs this repository's latest release,
+  checked against GitHub's SHA-256 digest and the SHA-256 in the release
+  notes, and hands the run over to it. A copy whose SHA-256 isn't the
+  published one for its version (an adapted copy) never updates itself.
+  `-NoSelfUpdate` skips the check.
+- `-Pause` keeps the window open at the end; a run started from Explorer
+  (a shortcut, "Run with PowerShell") pauses anyway.
+- When Arsenal Image Mounter's zip is due and missing, an update run
+  opens the vendor's downloads page in the default browser, at the
+  desktop's own rights.
+- Two generic sources for adapted catalogues: `DirectUrl` (a file at a
+  fixed URL) and `GitHubRelease` (a release's asset, verified against
+  GitHub's digest); the catalogue fields `Build` and `AssetPattern`; the
+  adapter contract in the README.
+
+### Changed
+- The workstation is laid out by category (what a tool examines: System,
+  Accounts, File Activity, Execution, Connected Devices, Registry, Event
+  Logs, Acquisition, Other), not by family (where it comes from): the
+  folders under `ForensicTools`, the Desktop and the Start Menu alike, a
+  folder per category; Timeline Explorer's shortcut stays directly on
+  both. A workstation built by an earlier version is moved into that
+  layout on its first update run: each tool's folder as it is, settings
+  and grants with it, nothing downloaded; its shortcuts and PATH entry are
+  remade. A tool in use stays where it is, with a warning, until the next
+  run. The dry run lists each move.
+- `inventory.csv` and `files.csv` carry a `Category` column after
+  `Family`; the result block groups tools by category.
+- A refusal by GitHub for its hourly limit of unauthenticated calls says
+  so, with the time it resets, instead of a bare "403 Forbidden".
+- A full run removes a category's folder under the install root once its
+  last tool is removed.
+- `inventory.csv` and `files.csv` carry the script's installed copy;
+  `-Verify` re-hashes it with the tools.
+- Sysinternals is checked through the `DirectUrl` adapter (no change in
+  what is checked).
+
+### Fixed
+- A dropped tool whose folder another process holds (e.g. as its working
+  folder) is left whole and reported as in use (WARN), as an update does;
+  before, its files were deleted, its folder, record and PATH entry left,
+  and the run failed. A removed copy that can't be deleted is removed by
+  the next run, with the category folder it leaves empty.
+- The dry run lists a source it couldn't check under Warnings, and one
+  that failed under Failures, as an update does; before, only the result
+  block showed them.
+
 ## 0.2.1 - 2026-10-26
 
 ### Fixed

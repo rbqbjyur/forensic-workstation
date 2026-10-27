@@ -10,9 +10,12 @@
 .DESCRIPTION
     One run does everything: on a fresh machine it installs every tool; later
     it checks each tool's source and downloads only what has changed. Tools go
-    under Program Files\ForensicTools\<Family>\<Tool>\. Command-line tools are
-    put on the machine PATH, so they run by name from any terminal; GUI tools
-    get shortcuts on the Desktop and in the Start Menu, grouped by family.
+    under Program Files\ForensicTools\<Category>\<Tool>\ (the category says
+    what the tool examines: File Activity, Execution, Registry, ...; the
+    family says where it comes from: Zimmerman, NirSoft, ...). Command-line
+    tools are put on the machine PATH, so they run by name from any terminal;
+    GUI tools get shortcuts on the Desktop and in the Start Menu, in a folder
+    per category.
 
     Prerequisites follow the tools: each .NET runtime line a tool's build
     needs (the Desktop Runtime only where a GUI tool needs it, since it also
@@ -43,7 +46,11 @@
 
 .PARAMETER Family
     Limits the run to the tools of these families (and the prerequisites
-    they need). A run with -Family or -Tool removes nothing.
+    they need). A run with -Family, -Category or -Tool removes nothing.
+
+.PARAMETER Category
+    Limits the run to the tools of these categories (and the prerequisites
+    they need). A name may be given without its spaces (FileActivity).
 
 .PARAMETER Tool
     Limits the run to these tools (and the prerequisites they need).
@@ -63,6 +70,11 @@
     .\Update-ForensicWorkstation.ps1 -Family NirSoft -Tool EvtxECmd
 
     Updates the NirSoft tools and EvtxECmd only.
+
+.EXAMPLE
+    .\Update-ForensicWorkstation.ps1 -Category Execution
+
+    Updates the tools of the Execution category only.
 
 .NOTES
     Version: $WorkstationVersion below (semver); changes are in CHANGELOG.md.
@@ -85,12 +97,16 @@ param(
     [switch]$CheckOnly,
     [switch]$Verify,
     [string[]]$Family = @(),
-    [string[]]$Tool = @()
+    [string[]]$Category = @(),
+    [string[]]$Tool = @(),
+    [switch]$Pause,
+    [switch]$NoSelfUpdate,
+    [switch]$ElevatedRelaunch
 )
 
 # ============================== CONFIG ==============================
 
-$WorkstationVersion = '0.2.1'
+$WorkstationVersion = '0.3.0'
 
 # No script-wide error suppression: every unit of work has its own try/catch.
 # Progress bars are off: Invoke-WebRequest in PowerShell 5.1 is many times
@@ -123,21 +139,37 @@ $InstallerSuccessExitCodes = @(0, 3010)
 $RestartRequiredExitCode = 3010
 
 # --- Families ---
-# Fields:
-#   Name             what -Family takes; the family's folder under the install
-#                    root
-#   ShortcutFolder   the Desktop and Start Menu folder for its GUI tools (used
-#                    when the family has more than one GUI tool; a family with
-#                    one gets its shortcut directly on the Desktop)
-#   ExpectedSigner   the Authenticode signer (certificate CN) of its exes
+# A family is where its tools come from: one vendor, one signer. Fields:
+#   Name             what -Family takes
+#   ExpectedSigner   the Authenticode signer (certificate CN) of its exes;
+#                    '' where the vendor signs nothing (only unsigned exes
+#                    are then accepted)
 #   UnsignedAllowed  $true where the vendor ships some builds unsigned: an
 #                    unsigned exe is then recorded as unsigned (its SHA-256 is
 #                    the record), a signature by anyone else is still a FAIL
 $Families = @(
-    [pscustomobject]@{ Name = 'Zimmerman';    ShortcutFolder = 'EZ Tools';     ExpectedSigner = 'ZimTech LLC';                      UnsignedAllowed = $false }
-    [pscustomobject]@{ Name = 'NirSoft';      ShortcutFolder = 'NirSoft';      ExpectedSigner = 'Nir Sofer';                        UnsignedAllowed = $true }
-    [pscustomobject]@{ Name = 'Sysinternals'; ShortcutFolder = 'Sysinternals'; ExpectedSigner = 'Microsoft Corporation';            UnsignedAllowed = $false }
-    [pscustomobject]@{ Name = 'Arsenal';      ShortcutFolder = 'Arsenal';      ExpectedSigner = 'Arsenal Consulting, Inc.';         UnsignedAllowed = $false }
+    [pscustomobject]@{ Name = 'Zimmerman';    ExpectedSigner = 'ZimTech LLC';                      UnsignedAllowed = $false }
+    [pscustomobject]@{ Name = 'NirSoft';      ExpectedSigner = 'Nir Sofer';                        UnsignedAllowed = $true }
+    [pscustomobject]@{ Name = 'Sysinternals'; ExpectedSigner = 'Microsoft Corporation';            UnsignedAllowed = $false }
+    [pscustomobject]@{ Name = 'Arsenal';      ExpectedSigner = 'Arsenal Consulting, Inc.';         UnsignedAllowed = $false }
+    [pscustomobject]@{ Name = 'SRUM-DUMP';    ExpectedSigner = '';                                 UnsignedAllowed = $true }
+)
+
+# --- Categories ---
+# A category is what its tools examine, and where they go on the
+# workstation: the folder under the install root, and the Desktop and Start
+# Menu folder of its GUI tools, all named for it. One category per tool; a
+# tool that spans several goes in Other. What -Category takes.
+$Categories = @(
+    'System'                # the machine itself: when it ran, what runs on it (Process Explorer, Autoruns)
+    'Accounts'              # users: profiles, logons, access to servers
+    'File Activity'         # what was opened, where: MFT, recycle bin, shortcuts, jump lists, shell bags, shims
+    'Execution'             # what ran: prefetch, SRUM, Amcache, UserAssist, timeline
+    'Connected Devices'     # USB and other devices
+    'Registry'              # hives, viewed and parsed
+    'Event Logs'            # Windows event logs
+    'Acquisition'           # images: making and mounting them
+    'Other'                 # used with every category's output (Timeline Explorer), or spanning several (SQLECmd)
 )
 
 # Arsenal Image Mounter's zip holds builds for other platforms and features
@@ -163,9 +195,10 @@ $EzRuntimesKept = @('runtimes\win-x64\*')                               # ...its
 
 # --- Tool catalogue ---
 # One row per tool. Adding a tool is adding a row. Fields:
-#   Name           what -Tool takes; the tool's folder under its family's
+#   Name           what -Tool takes; the tool's folder under its category's
 #   DisplayName    the shortcut's name (GUI tools)
-#   Family         a Name in $Families
+#   Family         a Name in $Families: where it comes from
+#   Category       a name in $Categories: where it goes on the workstation
 #   Source         the adapter that checks and downloads it:
 #                    EZTools       download.ericzimmermanstools.com; the build
 #                                  on the newest .NET line on the vendor's page
@@ -176,6 +209,16 @@ $EzRuntimesKept = @('runtimes\win-x64\*')                               # ...its
 #                                  page; the zip downloaded by hand into the
 #                                  account's Downloads folder (the vendor
 #                                  ships it through MEGA)
+#                    DirectUrl     any vendor that publishes a zip at a fixed
+#                                  URL: Package is the URL; the change marker
+#                                  is the server's headers (ETag,
+#                                  Last-Modified, Content-Length)
+#                    GitHubRelease any vendor that publishes releases on
+#                                  GitHub: Package is 'owner/repository',
+#                                  AssetPattern picks the zip; the latest
+#                                  release (not draft, not pre-release) by
+#                                  its tag; the asset's SHA-256 digest from
+#                                  the API is the vendor's hash
 #   Package        the adapter's name for it: EZTools and Sysinternals the
 #                  zip's name; NirSoft the name in its PAD and zip URLs;
 #                  ArsenalRecon the downloads page. Two rows may share a zip
@@ -209,62 +252,73 @@ $EzRuntimesKept = @('runtimes\win-x64\*')                               # ...its
 #                  is dropped) of files left out of the install: other
 #                  platforms' builds, features not wanted
 #   KeepFiles      patterns kept even where an ExcludeFiles pattern matches
+#   Build          the build's name where the source names none (DirectUrl,
+#                  GitHubRelease): 'x64' (the default) for a native tool, a
+#                  .NET tool's line ('net10'), which its runtimeconfig.json
+#                  must then confirm at install
+#   AssetPattern   GitHubRelease: a regular expression the release asset's
+#                  name must match (the first match is taken)
 #   RuntimeConfig  ArsenalRecon: the runtimeconfig.json in the zip that names
 #                  the build's .NET line (its zip names no line)
 #   ShortcutOutsideFolder  $true: the shortcuts sit directly on the Desktop
-#                  and in the Start Menu, not in the family's folder
-#                  (Timeline Explorer, used with every family)
+#                  and in the Start Menu, not in the category's folder
+#                  (Timeline Explorer, used with every category's output)
 #   EulaKeys       Sysinternals: subkeys of HKCU\Software\Sysinternals that
 #                  get EulaAccepted = 1
 $Catalogue = @(
     # Zimmerman: GUI tools (their .NET builds need the .NET Desktop Runtime of their line)
-    [pscustomobject]@{ Name = 'JumpListExplorer';  DisplayName = 'JumpList Explorer';  Family = 'Zimmerman'; Source = 'EZTools'; Package = 'JumpListExplorer.zip';  Gui = 'JumpListExplorer.exe';  Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('Settings.xml') }
-    [pscustomobject]@{ Name = 'MFTExplorer';       DisplayName = 'MFT Explorer';       Family = 'Zimmerman'; Source = 'EZTools'; Package = 'MFTExplorer.zip';       Gui = 'MFTExplorer.exe';       Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @() }
-    [pscustomobject]@{ Name = 'RegistryExplorer';  DisplayName = 'Registry Explorer';  Family = 'Zimmerman'; Source = 'EZTools'; Package = 'RegistryExplorer.zip';  Gui = 'RegistryExplorer.exe';  Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @('Bookmarks\User') }
-    [pscustomobject]@{ Name = 'SDBExplorer';       DisplayName = 'SDB Explorer';       Family = 'Zimmerman'; Source = 'EZTools'; Package = 'SDBExplorer.zip';       Gui = 'SDBExplorer.exe';       Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('Settings.xml') }
-    [pscustomobject]@{ Name = 'ShellBagsExplorer'; DisplayName = 'ShellBags Explorer'; Family = 'Zimmerman'; Source = 'EZTools'; Package = 'ShellBagsExplorer.zip'; Gui = 'ShellBagsExplorer.exe'; Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @('Settings', 'logs') }
-    [pscustomobject]@{ Name = 'TimelineExplorer';  DisplayName = 'Timeline Explorer';  Family = 'Zimmerman'; Source = 'EZTools'; Package = 'TimelineExplorer.zip';  Gui = 'TimelineExplorer.exe';  Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @('Settings'); ShortcutOutsideFolder = $true }
+    [pscustomobject]@{ Name = 'JumpListExplorer';  DisplayName = 'JumpList Explorer';  Family = 'Zimmerman'; Category = 'File Activity'; Source = 'EZTools'; Package = 'JumpListExplorer.zip';  Gui = 'JumpListExplorer.exe';  Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('Settings.xml') }
+    [pscustomobject]@{ Name = 'MFTExplorer';       DisplayName = 'MFT Explorer';       Family = 'Zimmerman'; Category = 'File Activity'; Source = 'EZTools'; Package = 'MFTExplorer.zip';       Gui = 'MFTExplorer.exe';       Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @() }
+    [pscustomobject]@{ Name = 'RegistryExplorer';  DisplayName = 'Registry Explorer';  Family = 'Zimmerman'; Category = 'Registry'; Source = 'EZTools'; Package = 'RegistryExplorer.zip';  Gui = 'RegistryExplorer.exe';  Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @('Bookmarks\User') }
+    [pscustomobject]@{ Name = 'SDBExplorer';       DisplayName = 'SDB Explorer';       Family = 'Zimmerman'; Category = 'File Activity'; Source = 'EZTools'; Package = 'SDBExplorer.zip';       Gui = 'SDBExplorer.exe';       Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('Settings.xml') }
+    [pscustomobject]@{ Name = 'ShellBagsExplorer'; DisplayName = 'ShellBags Explorer'; Family = 'Zimmerman'; Category = 'File Activity'; Source = 'EZTools'; Package = 'ShellBagsExplorer.zip'; Gui = 'ShellBagsExplorer.exe'; Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @('Settings', 'logs') }
+    [pscustomobject]@{ Name = 'TimelineExplorer';  DisplayName = 'Timeline Explorer';  Family = 'Zimmerman'; Category = 'Other'; Source = 'EZTools'; Package = 'TimelineExplorer.zip';  Gui = 'TimelineExplorer.exe';  Cli = @(); Requires = @('DotNet:WindowsDesktop'); KeepPaths = @(); WritablePaths = @('Settings'); ShortcutOutsideFolder = $true }
     # Zimmerman: command-line tools (their .NET builds need the .NET Runtime of their line). Since 2026.10, five of them copy the
     # evidence databases they read into a Temp folder beside their exe (unless --temp is given): a writable subfolder
-    [pscustomobject]@{ Name = 'AmcacheParser';         DisplayName = 'AmcacheParser';         Family = 'Zimmerman'; Source = 'EZTools'; Package = 'AmcacheParser.zip';         Gui = $null; Cli = @('AmcacheParser.exe');         Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @('Temp'); ExcludeFiles = @($EzSqliteOtherPlatforms) }
-    [pscustomobject]@{ Name = 'AppCompatCacheParser';  DisplayName = 'AppCompatCacheParser';  Family = 'Zimmerman'; Source = 'EZTools'; Package = 'AppCompatCacheParser.zip';  Gui = $null; Cli = @('AppCompatCacheParser.exe');  Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
-    [pscustomobject]@{ Name = 'EvtxECmd';              DisplayName = 'EvtxECmd';              Family = 'Zimmerman'; Source = 'EZTools'; Package = 'EvtxECmd.zip';              Gui = $null; Cli = @('EvtxECmd.exe');              Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
-    [pscustomobject]@{ Name = 'JLECmd';                DisplayName = 'JLECmd';                Family = 'Zimmerman'; Source = 'EZTools'; Package = 'JLECmd.zip';                Gui = $null; Cli = @('JLECmd.exe');                Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
-    [pscustomobject]@{ Name = 'LECmd';                 DisplayName = 'LECmd';                 Family = 'Zimmerman'; Source = 'EZTools'; Package = 'LECmd.zip';                 Gui = $null; Cli = @('LECmd.exe');                 Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
-    [pscustomobject]@{ Name = 'MFTECmd';               DisplayName = 'MFTECmd';               Family = 'Zimmerman'; Source = 'EZTools'; Package = 'MFTECmd.zip';               Gui = $null; Cli = @('MFTECmd.exe');               Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
-    [pscustomobject]@{ Name = 'PECmd';                 DisplayName = 'PECmd';                 Family = 'Zimmerman'; Source = 'EZTools'; Package = 'PECmd.zip';                 Gui = $null; Cli = @('PECmd.exe');                 Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
-    [pscustomobject]@{ Name = 'RBCmd';                 DisplayName = 'RBCmd';                 Family = 'Zimmerman'; Source = 'EZTools'; Package = 'RBCmd.zip';                 Gui = $null; Cli = @('RBCmd.exe');                 Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
-    [pscustomobject]@{ Name = 'RecentFileCacheParser'; DisplayName = 'RecentFileCacheParser'; Family = 'Zimmerman'; Source = 'EZTools'; Package = 'RecentFileCacheParser.zip'; Gui = $null; Cli = @('RecentFileCacheParser.exe'); Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
-    [pscustomobject]@{ Name = 'RECmd';                 DisplayName = 'RECmd';                 Family = 'Zimmerman'; Source = 'EZTools'; Package = 'RECmd.zip';                 Gui = $null; Cli = @('RECmd.exe');                 Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
-    [pscustomobject]@{ Name = 'SBECmd';                DisplayName = 'SBECmd';                Family = 'Zimmerman'; Source = 'EZTools'; Package = 'SBECmd.zip';                Gui = $null; Cli = @('SBECmd.exe');                Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
-    [pscustomobject]@{ Name = 'SQLECmd';               DisplayName = 'SQLECmd';               Family = 'Zimmerman'; Source = 'EZTools'; Package = 'SQLECmd.zip';               Gui = $null; Cli = @('SQLECmd.exe');               Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @('Temp'); ExcludeFiles = @($EzRuntimesOtherPlatforms); KeepFiles = @($EzRuntimesKept) }
-    [pscustomobject]@{ Name = 'SrumECmd';              DisplayName = 'SrumECmd';              Family = 'Zimmerman'; Source = 'EZTools'; Package = 'SrumECmd.zip';              Gui = $null; Cli = @('SrumECmd.exe');              Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @('Temp') }
-    [pscustomobject]@{ Name = 'SumECmd';               DisplayName = 'SumECmd';               Family = 'Zimmerman'; Source = 'EZTools'; Package = 'SumECmd.zip';               Gui = $null; Cli = @('SumECmd.exe');               Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @('Temp') }
-    [pscustomobject]@{ Name = 'WxTCmd';                DisplayName = 'WxTCmd';                Family = 'Zimmerman'; Source = 'EZTools'; Package = 'WxTCmd.zip';                Gui = $null; Cli = @('WxTCmd.exe');                Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @('Temp'); ExcludeFiles = @($EzSqliteOtherPlatforms) }
+    [pscustomobject]@{ Name = 'AmcacheParser';         DisplayName = 'AmcacheParser';         Family = 'Zimmerman'; Category = 'Execution'; Source = 'EZTools'; Package = 'AmcacheParser.zip';         Gui = $null; Cli = @('AmcacheParser.exe');         Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @('Temp'); ExcludeFiles = @($EzSqliteOtherPlatforms) }
+    [pscustomobject]@{ Name = 'AppCompatCacheParser';  DisplayName = 'AppCompatCacheParser';  Family = 'Zimmerman'; Category = 'File Activity'; Source = 'EZTools'; Package = 'AppCompatCacheParser.zip';  Gui = $null; Cli = @('AppCompatCacheParser.exe');  Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
+    [pscustomobject]@{ Name = 'EvtxECmd';              DisplayName = 'EvtxECmd';              Family = 'Zimmerman'; Category = 'Event Logs'; Source = 'EZTools'; Package = 'EvtxECmd.zip';              Gui = $null; Cli = @('EvtxECmd.exe');              Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
+    [pscustomobject]@{ Name = 'JLECmd';                DisplayName = 'JLECmd';                Family = 'Zimmerman'; Category = 'File Activity'; Source = 'EZTools'; Package = 'JLECmd.zip';                Gui = $null; Cli = @('JLECmd.exe');                Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
+    [pscustomobject]@{ Name = 'LECmd';                 DisplayName = 'LECmd';                 Family = 'Zimmerman'; Category = 'File Activity'; Source = 'EZTools'; Package = 'LECmd.zip';                 Gui = $null; Cli = @('LECmd.exe');                 Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
+    [pscustomobject]@{ Name = 'MFTECmd';               DisplayName = 'MFTECmd';               Family = 'Zimmerman'; Category = 'File Activity'; Source = 'EZTools'; Package = 'MFTECmd.zip';               Gui = $null; Cli = @('MFTECmd.exe');               Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
+    [pscustomobject]@{ Name = 'PECmd';                 DisplayName = 'PECmd';                 Family = 'Zimmerman'; Category = 'Execution'; Source = 'EZTools'; Package = 'PECmd.zip';                 Gui = $null; Cli = @('PECmd.exe');                 Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
+    [pscustomobject]@{ Name = 'RBCmd';                 DisplayName = 'RBCmd';                 Family = 'Zimmerman'; Category = 'File Activity'; Source = 'EZTools'; Package = 'RBCmd.zip';                 Gui = $null; Cli = @('RBCmd.exe');                 Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
+    [pscustomobject]@{ Name = 'RecentFileCacheParser'; DisplayName = 'RecentFileCacheParser'; Family = 'Zimmerman'; Category = 'Execution'; Source = 'EZTools'; Package = 'RecentFileCacheParser.zip'; Gui = $null; Cli = @('RecentFileCacheParser.exe'); Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
+    [pscustomobject]@{ Name = 'RECmd';                 DisplayName = 'RECmd';                 Family = 'Zimmerman'; Category = 'Registry'; Source = 'EZTools'; Package = 'RECmd.zip';                 Gui = $null; Cli = @('RECmd.exe');                 Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
+    [pscustomobject]@{ Name = 'SBECmd';                DisplayName = 'SBECmd';                Family = 'Zimmerman'; Category = 'File Activity'; Source = 'EZTools'; Package = 'SBECmd.zip';                Gui = $null; Cli = @('SBECmd.exe');                Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @() }
+    [pscustomobject]@{ Name = 'SQLECmd';               DisplayName = 'SQLECmd';               Family = 'Zimmerman'; Category = 'Other'; Source = 'EZTools'; Package = 'SQLECmd.zip';               Gui = $null; Cli = @('SQLECmd.exe');               Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @('Temp'); ExcludeFiles = @($EzRuntimesOtherPlatforms); KeepFiles = @($EzRuntimesKept) }
+    [pscustomobject]@{ Name = 'SrumECmd';              DisplayName = 'SrumECmd';              Family = 'Zimmerman'; Category = 'Execution'; Source = 'EZTools'; Package = 'SrumECmd.zip';              Gui = $null; Cli = @('SrumECmd.exe');              Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @('Temp') }
+    [pscustomobject]@{ Name = 'SumECmd';               DisplayName = 'SumECmd';               Family = 'Zimmerman'; Category = 'Accounts'; Source = 'EZTools'; Package = 'SumECmd.zip';               Gui = $null; Cli = @('SumECmd.exe');               Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @('Temp') }
+    [pscustomobject]@{ Name = 'WxTCmd';                DisplayName = 'WxTCmd';                Family = 'Zimmerman'; Category = 'Execution'; Source = 'EZTools'; Package = 'WxTCmd.zip';                Gui = $null; Cli = @('WxTCmd.exe');                Requires = @('DotNet:NETCore'); KeepPaths = @(); WritablePaths = @('Temp'); ExcludeFiles = @($EzSqliteOtherPlatforms) }
     # NirSoft (GUI tools, no prerequisites)
-    [pscustomobject]@{ Name = 'FullEventLogView';      DisplayName = 'FullEventLogView';      Family = 'NirSoft'; Source = 'NirSoft'; Package = 'fulleventlogview';      Gui = 'FullEventLogView.exe';      Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('FullEventLogView.cfg') }
-    [pscustomobject]@{ Name = 'OfflineRegistryView';   DisplayName = 'OfflineRegistryView';   Family = 'NirSoft'; Source = 'NirSoft'; Package = 'offlineregistryview';   Gui = 'OfflineRegistryView.exe';   Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('OfflineRegistryView.cfg') }
-    [pscustomobject]@{ Name = 'OfflineRegistryFinder'; DisplayName = 'OfflineRegistryFinder'; Family = 'NirSoft'; Source = 'NirSoft'; Package = 'offlineregistryfinder'; Gui = 'OfflineRegistryFinder.exe'; Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('OfflineRegistryFinder.cfg') }
-    [pscustomobject]@{ Name = 'ShortcutsMan';          DisplayName = 'ShortcutsMan';          Family = 'NirSoft'; Source = 'NirSoft'; Package = 'shman';                 Gui = 'shman.exe';                 Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('shman.cfg') }
-    [pscustomobject]@{ Name = 'JumpListsView';         DisplayName = 'JumpListsView';         Family = 'NirSoft'; Source = 'NirSoft'; Package = 'jumplistsview';         Gui = 'JumpListsView.exe';         Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('JumpListsView.cfg') }
-    [pscustomobject]@{ Name = 'ShellBagsView';         DisplayName = 'ShellBagsView';         Family = 'NirSoft'; Source = 'NirSoft'; Package = 'shellbagsview';         Gui = 'ShellBagsView.exe';         Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('ShellBagsView.cfg') }
-    [pscustomobject]@{ Name = 'RecentFilesView';       DisplayName = 'RecentFilesView';       Family = 'NirSoft'; Source = 'NirSoft'; Package = 'recentfilesview';       Gui = 'RecentFilesView.exe';       Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('RecentFilesView.cfg') }
-    [pscustomobject]@{ Name = 'AppCompatibilityView';  DisplayName = 'AppCompatibilityView';  Family = 'NirSoft'; Source = 'NirSoft'; Package = 'appcompatibilityview';  Gui = 'AppCompatibilityView.exe';  Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('AppCompatibilityView.cfg') }
-    [pscustomobject]@{ Name = 'AppResourcesUsageView'; DisplayName = 'AppResourcesUsageView'; Family = 'NirSoft'; Source = 'NirSoft'; Package = 'appresourcesusageview'; Gui = 'AppResourcesUsageView.exe'; Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('AppResourcesUsageView.cfg') }
-    [pscustomobject]@{ Name = 'WinPrefetchView';       DisplayName = 'WinPrefetchView';       Family = 'NirSoft'; Source = 'NirSoft'; Package = 'winprefetchview';       Gui = 'WinPrefetchView.exe';       Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('WinPrefetchView.cfg') }
-    [pscustomobject]@{ Name = 'UserAssistView';        DisplayName = 'UserAssistView';        Family = 'NirSoft'; Source = 'NirSoft'; Package = 'userassistview';        Gui = 'UserAssistView.exe';        Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('UserAssistView.cfg') }
-    [pscustomobject]@{ Name = 'USBDeview';             DisplayName = 'USBDeview';             Family = 'NirSoft'; Source = 'NirSoft'; Package = 'usbdeview';             Gui = 'USBDeview.exe';             Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('USBDeview.cfg') }
+    [pscustomobject]@{ Name = 'FullEventLogView';      DisplayName = 'FullEventLogView';      Family = 'NirSoft'; Category = 'Event Logs'; Source = 'NirSoft'; Package = 'fulleventlogview';      Gui = 'FullEventLogView.exe';      Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('FullEventLogView.cfg') }
+    [pscustomobject]@{ Name = 'OfflineRegistryView';   DisplayName = 'OfflineRegistryView';   Family = 'NirSoft'; Category = 'Registry'; Source = 'NirSoft'; Package = 'offlineregistryview';   Gui = 'OfflineRegistryView.exe';   Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('OfflineRegistryView.cfg') }
+    [pscustomobject]@{ Name = 'OfflineRegistryFinder'; DisplayName = 'OfflineRegistryFinder'; Family = 'NirSoft'; Category = 'Registry'; Source = 'NirSoft'; Package = 'offlineregistryfinder'; Gui = 'OfflineRegistryFinder.exe'; Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('OfflineRegistryFinder.cfg') }
+    [pscustomobject]@{ Name = 'ShortcutsMan';          DisplayName = 'ShortcutsMan';          Family = 'NirSoft'; Category = 'File Activity'; Source = 'NirSoft'; Package = 'shman';                 Gui = 'shman.exe';                 Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('shman.cfg') }
+    [pscustomobject]@{ Name = 'JumpListsView';         DisplayName = 'JumpListsView';         Family = 'NirSoft'; Category = 'File Activity'; Source = 'NirSoft'; Package = 'jumplistsview';         Gui = 'JumpListsView.exe';         Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('JumpListsView.cfg') }
+    [pscustomobject]@{ Name = 'ShellBagsView';         DisplayName = 'ShellBagsView';         Family = 'NirSoft'; Category = 'File Activity'; Source = 'NirSoft'; Package = 'shellbagsview';         Gui = 'ShellBagsView.exe';         Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('ShellBagsView.cfg') }
+    [pscustomobject]@{ Name = 'RecentFilesView';       DisplayName = 'RecentFilesView';       Family = 'NirSoft'; Category = 'File Activity'; Source = 'NirSoft'; Package = 'recentfilesview';       Gui = 'RecentFilesView.exe';       Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('RecentFilesView.cfg') }
+    [pscustomobject]@{ Name = 'AppCompatibilityView';  DisplayName = 'AppCompatibilityView';  Family = 'NirSoft'; Category = 'File Activity'; Source = 'NirSoft'; Package = 'appcompatibilityview';  Gui = 'AppCompatibilityView.exe';  Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('AppCompatibilityView.cfg') }
+    [pscustomobject]@{ Name = 'AppResourcesUsageView'; DisplayName = 'AppResourcesUsageView'; Family = 'NirSoft'; Category = 'Execution'; Source = 'NirSoft'; Package = 'appresourcesusageview'; Gui = 'AppResourcesUsageView.exe'; Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('AppResourcesUsageView.cfg') }
+    [pscustomobject]@{ Name = 'WinPrefetchView';       DisplayName = 'WinPrefetchView';       Family = 'NirSoft'; Category = 'Execution'; Source = 'NirSoft'; Package = 'winprefetchview';       Gui = 'WinPrefetchView.exe';       Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('WinPrefetchView.cfg') }
+    [pscustomobject]@{ Name = 'UserAssistView';        DisplayName = 'UserAssistView';        Family = 'NirSoft'; Category = 'Execution'; Source = 'NirSoft'; Package = 'userassistview';        Gui = 'UserAssistView.exe';        Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('UserAssistView.cfg') }
+    [pscustomobject]@{ Name = 'USBDeview';             DisplayName = 'USBDeview';             Family = 'NirSoft'; Category = 'Connected Devices'; Source = 'NirSoft'; Package = 'usbdeview';             Gui = 'USBDeview.exe';             Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('USBDeview.cfg') }
+    [pscustomobject]@{ Name = 'TurnedOnTimesView';     DisplayName = 'TurnedOnTimesView';     Family = 'NirSoft'; Category = 'System'; Source = 'NirSoft'; Package = 'turnedontimesview';             Gui = 'TurnedOnTimesView.exe';             Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('TurnedOnTimesView.cfg') }
+    [pscustomobject]@{ Name = 'UserProfilesView';      DisplayName = 'UserProfilesView';      Family = 'NirSoft'; Category = 'Accounts'; Source = 'NirSoft'; Package = 'userprofilesview';             Gui = 'UserProfilesView.exe';             Cli = @(); Requires = @(); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('UserProfilesView.cfg') }
     # Sysinternals (each zip holds 32-bit, 64-bit and ARM64 builds; only the 64-bit ones are installed)
-    [pscustomobject]@{ Name = 'ProcessExplorer'; DisplayName = 'Process Explorer'; Family = 'Sysinternals'; Source = 'Sysinternals'; Package = 'ProcessExplorer.zip'; Gui = 'procexp64.exe';  Cli = @();                  Requires = @(); KeepPaths = @(); WritablePaths = @(); Files = @('procexp64.exe', 'Eula.txt'); EulaKeys = @('Process Explorer') }
-    [pscustomobject]@{ Name = 'Autoruns';        DisplayName = 'Autoruns';         Family = 'Sysinternals'; Source = 'Sysinternals'; Package = 'Autoruns.zip';        Gui = 'Autoruns64.exe'; Cli = @();                  Requires = @(); KeepPaths = @(); WritablePaths = @(); Files = @('Autoruns64.exe', 'Eula.txt'); EulaKeys = @('AutoRuns') }
+    [pscustomobject]@{ Name = 'ProcessExplorer'; DisplayName = 'Process Explorer'; Family = 'Sysinternals'; Category = 'System'; Source = 'Sysinternals'; Package = 'ProcessExplorer.zip'; Gui = 'procexp64.exe';  Cli = @();                  Requires = @(); KeepPaths = @(); WritablePaths = @(); Files = @('procexp64.exe', 'Eula.txt'); EulaKeys = @('Process Explorer') }
+    [pscustomobject]@{ Name = 'Autoruns';        DisplayName = 'Autoruns';         Family = 'Sysinternals'; Category = 'System'; Source = 'Sysinternals'; Package = 'Autoruns.zip';        Gui = 'Autoruns64.exe'; Cli = @();                  Requires = @(); KeepPaths = @(); WritablePaths = @(); Files = @('Autoruns64.exe', 'Eula.txt'); EulaKeys = @('AutoRuns') }
     # autorunsc from the same zip as Autoruns, in a folder of its own: only it goes on PATH
-    [pscustomobject]@{ Name = 'Autorunsc';       DisplayName = 'autorunsc';        Family = 'Sysinternals'; Source = 'Sysinternals'; Package = 'Autoruns.zip';        Gui = $null;            Cli = @('autorunsc64.exe'); Requires = @(); KeepPaths = @(); WritablePaths = @(); Files = @('autorunsc64.exe', 'Eula.txt'); EulaKeys = @('Autorunsc') }
-    [pscustomobject]@{ Name = 'Disk2vhd';        DisplayName = 'Disk2vhd';         Family = 'Sysinternals'; Source = 'Sysinternals'; Package = 'Disk2vhd.zip';        Gui = 'disk2vhd64.exe'; Cli = @();                  Requires = @(); KeepPaths = @(); WritablePaths = @(); Files = @('disk2vhd64.exe', 'Disk2vhd.chm', 'Eula.txt'); EulaKeys = @('Disk2Vhd') }
+    [pscustomobject]@{ Name = 'Autorunsc';       DisplayName = 'autorunsc';        Family = 'Sysinternals'; Category = 'System'; Source = 'Sysinternals'; Package = 'Autoruns.zip';        Gui = $null;            Cli = @('autorunsc64.exe'); Requires = @(); KeepPaths = @(); WritablePaths = @(); Files = @('autorunsc64.exe', 'Eula.txt'); EulaKeys = @('Autorunsc') }
+    [pscustomobject]@{ Name = 'Disk2vhd';        DisplayName = 'Disk2vhd';         Family = 'Sysinternals'; Category = 'Acquisition'; Source = 'Sysinternals'; Package = 'Disk2vhd.zip';        Gui = 'disk2vhd64.exe'; Cli = @();                  Requires = @(); KeepPaths = @(); WritablePaths = @(); Files = @('disk2vhd64.exe', 'Disk2vhd.chm', 'Eula.txt'); EulaKeys = @('Disk2Vhd') }
     # Arsenal Image Mounter: the zip downloaded by hand; the GUI and the CLI as two tools, so only the CLI's folder is on PATH. It needs the Visual C++ Redistributable (the GUI) and its driver (both), prerequisites of their own.
-    [pscustomobject]@{ Name = 'ArsenalImageMounter'; DisplayName = 'Arsenal Image Mounter'; Family = 'Arsenal'; Source = 'ArsenalRecon'; Package = 'https://arsenalrecon.com/products/arsenal-image-mounter/downloads'; RuntimeConfig = 'ArsenalImageMounter.runtimeconfig.json'
+    [pscustomobject]@{ Name = 'ArsenalImageMounter'; DisplayName = 'Arsenal Image Mounter'; Family = 'Arsenal'; Category = 'Acquisition'; Source = 'ArsenalRecon'; Package = 'https://arsenalrecon.com/products/arsenal-image-mounter/downloads'; RuntimeConfig = 'ArsenalImageMounter.runtimeconfig.json'
         Gui = 'ArsenalImageMounter.exe'; Cli = @(); Requires = @('DotNet:WindowsDesktop', 'VCRedist:x64', 'AimDriver'); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('ArsenalImageMounter.log'); ExcludeFiles = @($ArsenalNotInstalled) + @('aim_cli.exe', 'aim_pro.exe'); KeepFiles = @($ArsenalKept) }
-    [pscustomobject]@{ Name = 'AimCli'; DisplayName = 'AIM CLI'; Family = 'Arsenal'; Source = 'ArsenalRecon'; Package = 'https://arsenalrecon.com/products/arsenal-image-mounter/downloads'; RuntimeConfig = 'aim_cli.runtimeconfig.json'
+    [pscustomobject]@{ Name = 'AimCli'; DisplayName = 'AIM CLI'; Family = 'Arsenal'; Category = 'Acquisition'; Source = 'ArsenalRecon'; Package = 'https://arsenalrecon.com/products/arsenal-image-mounter/downloads'; RuntimeConfig = 'aim_cli.runtimeconfig.json'
         Gui = $null; Cli = @('aim_cli.exe', 'aim_pro.exe'); Requires = @('DotNet:NETCore', 'AimDriver'); KeepPaths = @(); WritablePaths = @(); ExcludeFiles = @($ArsenalNotInstalled) + @('ArsenalImageMounter.*'); KeepFiles = @($ArsenalKept) }
+    # SRUM-DUMP: one exe released on GitHub, as a GUI tool and, in a folder of its own, as the command-line srum_dump: only that folder goes on PATH
+    [pscustomobject]@{ Name = 'SrumDump';    DisplayName = 'SRUM-DUMP'; Family = 'SRUM-DUMP'; Category = 'Execution'; Source = 'GitHubRelease'; Package = 'MarkBaggett/srum-dump'; AssetPattern = '^srum_dump\.exe$'; Gui = 'srum_dump.exe'; Cli = @();                Requires = @(); KeepPaths = @(); WritablePaths = @() }
+    [pscustomobject]@{ Name = 'SrumDumpCli'; DisplayName = 'srum_dump'; Family = 'SRUM-DUMP'; Category = 'Execution'; Source = 'GitHubRelease'; Package = 'MarkBaggett/srum-dump'; AssetPattern = '^srum_dump\.exe$'; Gui = $null;          Cli = @('srum_dump.exe'); Requires = @(); KeepPaths = @(); WritablePaths = @() }
 )
 
 # Arsenal: the newest release on the downloads page (listed newest first),
@@ -405,10 +459,36 @@ $ProcessorArchitectureNames = @{ 0 = 'X86'; 5 = 'Arm'; 9 = 'X64'; 12 = 'Arm64' }
 $MachineEnvironmentKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
 $ProcessorArchitectureRegistryNames = @{ 'AMD64' = 'X64'; 'ARM64' = 'Arm64'; 'x86' = 'X86' }
 
+# --- The script itself ---
+# Self-update: the latest release of this repository on GitHub, its script
+# asset verified against the asset's SHA-256 digest from the API and the
+# SHA-256 line in the release notes (both must agree). Only a copy whose
+# own SHA-256 is the one published for its version updates itself: an
+# adapted copy never is overwritten. An adapted copy sets the repository
+# to '' (self-update off) or to its own.
+$SelfUpdateRepository = 'rbqbjyur/forensic-workstation'
+$SelfUpdateAssetPattern = '^Update-ForensicWorkstation(-\d+(\.\d+)*)?\.ps1$'
+$SelfUpdateNotesHashPattern = 'SHA-256 of `Update-ForensicWorkstation\.ps1`: `([0-9a-fA-F]{64})`'
+# The protected copy: this script under the install root (Program Files,
+# writable by administrators only), which the shortcut runs. A copy run
+# from anywhere else (Downloads) installs or refreshes it.
+$ProtectedScriptName = 'Update-ForensicWorkstation.ps1'
+$ScriptShortcutName = 'Update forensic workstation'
+$ScriptShortcutArguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -Pause'     # {0}: the protected copy's path
+
+# --- Shortcuts ---
+# A shortcut's "Run as administrator": the RunAsUser bit of the LinkFlags
+# field in the .lnk header (MS-SHLLINK 2.1.1), which WScript.Shell can't
+# set. The header is 0x4C bytes; LinkFlags is the UInt32 at 0x14. Only the
+# script's own shortcut carries it (AGENTS.md: tool shortcuts never do).
+$ShortcutHeaderSize = 0x4C
+$ShortcutLinkFlagsOffset = 0x14
+$ShortcutRunAsUserFlag = 0x00002000
+
 # --- Records ---
 # Column names: part of the tool's contract once at 1.0 (AGENTS.md).
-$InventoryColumns = @('Kind', 'Family', 'Name', 'Version', 'Build', 'Owned', 'SourceUrl', 'DownloadSha256', 'VendorHashAlgorithm', 'VendorHash', 'VendorHashMatched', 'Signer', 'ChangeMarker', 'InstalledUtc', 'Location')
-$FilesColumns = @('Family', 'Tool', 'Class', 'RelativePath', 'Length', 'Sha256', 'RecordedUtc')
+$InventoryColumns = @('Kind', 'Family', 'Category', 'Name', 'Version', 'Build', 'Owned', 'SourceUrl', 'DownloadSha256', 'VendorHashAlgorithm', 'VendorHash', 'VendorHashMatched', 'Signer', 'ChangeMarker', 'InstalledUtc', 'Location')
+$FilesColumns = @('Family', 'Category', 'Tool', 'Class', 'RelativePath', 'Length', 'Sha256', 'RecordedUtc')
 $StateSchemaVersion = 1
 
 # ============================= FUNCTIONS =============================
@@ -517,7 +597,31 @@ function Stop-Run {
     Write-ConsoleLine -Text ''
     Write-ConsoleLine -Text "Stopped before any work: $Reason" -ContinuationIndent 2
     foreach ($item in $List) { Write-ConsoleLine -Text "- $item" -Indent 2 -ContinuationIndent 4 }
-    exit 3
+    Exit-Run -Code 3
+}
+
+# Every exit goes through here: when the window would close with the run
+# (-Pause, or started from Explorer: a shortcut, "Run with PowerShell"), it
+# waits for a key first, so the result can be read.
+function Exit-Run {
+    param([int]$Code)
+    if ($script:pauseAtExit -and -not [Console]::IsInputRedirected) {
+        Write-Host ''
+        Write-Host 'Press any key to close this window.'
+        try { $null = [Console]::ReadKey($true) } catch {}
+    }
+    exit $Code
+}
+
+# Whether Explorer started this process (a shortcut, or "Run with
+# PowerShell" from the right-click menu): its window closes when the run
+# ends, so the run pauses first. Unknown counts as not.
+function Test-StartedFromExplorer {
+    try {
+        $parentId = (Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop).ParentProcessId
+        $parent = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$parentId" -ErrorAction Stop
+        return ([string]$parent.Name -ieq 'explorer.exe')
+    } catch { return $false }
 }
 
 # A section opens the same way every time: a blank line, a rule, the title.
@@ -605,6 +709,19 @@ function Get-CheckStatus {
         'Unavailable' { return 'FAIL' }
     }
     return 'WARN'
+}
+
+# A dry run lists its checks' problems as an update does: a check that
+# couldn't be made (Unknown) under Warnings, one that failed (Unavailable)
+# under Failures. Returns the result line's detail, with its pointer to the
+# list where the check went into one.
+function Add-CheckProblemToList {
+    param([string]$CheckStatus, [string]$Name, [string]$Detail)
+    switch ($CheckStatus) {
+        'Unknown'     { Add-RunWarning -Message "${Name}: $Detail"; return "$Detail (see Warnings)" }
+        'Unavailable' { Add-RunFailure -Message "${Name}: $Detail"; return "$Detail (see Failures)" }
+    }
+    return $Detail
 }
 
 # One CSV line: every cell quoted, a quote inside a cell doubled (RFC 4180).
@@ -1084,6 +1201,7 @@ function Read-State {
         $record.Files = @($record.Files | Where-Object { $_ })
     }
     foreach ($record in @($state.Prerequisites.Values)) { if ($null -eq $record.Versions) { $record.Versions = @{} } }
+    if ($state.Script) { $state.Script.Shortcuts = @($state.Script.Shortcuts | Where-Object { $_ }) }
     return $state
 }
 
@@ -1147,7 +1265,39 @@ function Get-HttpJson {
 function Get-GitHubJson {
     param([string]$Path)
     $headers = @{ 'Accept' = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
-    return (Get-HttpJson -Uri ($script:GitHubApiRoot + $Path) -Headers $headers)
+    try {
+        return (Get-HttpJson -Uri ($script:GitHubApiRoot + $Path) -Headers $headers)
+    } catch {
+        # GitHub's refusal for its hourly limit says what it is, so the
+        # analyst waits rather than looks for a fault.
+        $limitMessage = Get-GitHubRateLimitMessage -ErrorRecord $_
+        if ($limitMessage) { throw $limitMessage }
+        throw
+    }
+}
+
+# The message for GitHub's refusal when the hourly limit of unauthenticated
+# calls is used up (403 or 429 with X-RateLimit-Remaining: 0), or '' for
+# any other error.
+function Get-GitHubRateLimitMessage {
+    param($ErrorRecord)
+    $response = $null
+    try { $response = $ErrorRecord.Exception.Response } catch {}
+    if (-not $response -or @(403, 429) -notcontains [int]$response.StatusCode) { return '' }
+    return (Format-GitHubRateLimitMessage -Remaining ([string]$response.Headers['X-RateLimit-Remaining']) -ResetEpochSeconds ([string]$response.Headers['X-RateLimit-Reset']))
+}
+
+# The rate-limit message from GitHub's two headers: '' unless no call is
+# left; the reset time in UTC where the header gives it.
+function Format-GitHubRateLimitMessage {
+    param([string]$Remaining, [string]$ResetEpochSeconds)
+    if ($Remaining -ne '0') { return '' }
+    $resetText = ''
+    $resetSeconds = 0L
+    if ([long]::TryParse($ResetEpochSeconds, [ref]$resetSeconds) -and $resetSeconds -gt 0) {
+        $resetText = " (resets $(Format-UtcTime -Time ([DateTimeOffset]::FromUnixTimeSeconds($resetSeconds).UtcDateTime)))"
+    }
+    return "GitHub's hourly limit for unauthenticated calls from this address is used up$resetText; it passes on its own"
 }
 
 function Save-HttpFile {
@@ -1256,12 +1406,62 @@ function Get-NirSoftRemote {
     return (New-Remote -Available $false -Detail 'no build found (x64 or x86)')
 }
 
+# The generic adapter for a file at a fixed URL: the server's headers are
+# the change marker; the build is the row's (default x64).
+function Get-DirectUrlRemote {
+    param([string]$Url, [string]$FileName, [string]$Build = 'x64')
+    $head = Invoke-HttpHead -Uri $Url
+    if (-not $head) { return (New-Remote -Available $false -Detail "not found: $Url") }
+    return (New-Remote -Available $true -Build $Build -Marker (Get-HeaderMarker -Head $head) -Url $Url -FileName $FileName)
+}
+
 function Get-SysinternalsRemote {
     param($CatalogueTool)
-    $url = $script:SysinternalsZipUrl -f $CatalogueTool.Package
-    $head = Invoke-HttpHead -Uri $url
-    if (-not $head) { return (New-Remote -Available $false -Detail "not found: $url") }
-    return (New-Remote -Available $true -Build 'x64' -Marker (Get-HeaderMarker -Head $head) -Url $url -FileName $CatalogueTool.Package)
+    return (Get-DirectUrlRemote -Url ($script:SysinternalsZipUrl -f $CatalogueTool.Package) -FileName $CatalogueTool.Package -Build 'x64')
+}
+
+# The latest release of a GitHub repository (not a draft, not a
+# pre-release), by its tag read as a version; $null when there is none.
+function Get-GitHubLatestRelease {
+    param([string]$Repository)
+    # Two rows from one repository (SRUM-DUMP's GUI and CLI) share one call.
+    if ($script:gitHubReleasesByRepository.ContainsKey($Repository)) {
+        $releases = $script:gitHubReleasesByRepository[$Repository]
+    } else {
+        $releases = @(Get-GitHubJson -Path "/repos/$Repository/releases?per_page=30")
+        $script:gitHubReleasesByRepository[$Repository] = $releases
+    }
+    $best = $null
+    $bestVersion = $null
+    foreach ($release in $releases) {
+        if ($release.draft -or $release.prerelease) { continue }
+        $version = ConvertTo-VersionOrNull -Text $release.tag_name
+        if (-not $version) { continue }
+        if (-not $bestVersion -or $version -gt $bestVersion) { $best = $release; $bestVersion = $version }
+    }
+    return $best
+}
+
+# A release's asset as a remote: the first asset whose name matches the
+# pattern; its SHA-256 digest (as GitHub's API gives it) is the vendor's
+# hash; the marker is the tag, the asset's name and its digest.
+function ConvertTo-GitHubAssetRemote {
+    param($Release, [string]$AssetPattern, [string]$Build = 'x64')
+    if (-not $Release) { return (New-Remote -Available $false -Detail 'no release found') }
+    $asset = @($Release.assets | Where-Object { $_.name -match $AssetPattern }) | Select-Object -First 1
+    if (-not $asset) { return (New-Remote -Available $false -Detail "release $($Release.tag_name) has no asset matching $AssetPattern") }
+    $vendorHash = ''
+    $vendorHashAlgorithm = ''
+    if ($asset.digest -and $asset.digest -match '^sha256:([0-9a-f]{64})$') { $vendorHash = $Matches[1]; $vendorHashAlgorithm = 'SHA256' }
+    $version = (ConvertTo-VersionOrNull -Text $Release.tag_name).ToString()
+    return (New-Remote -Available $true -Version $version -Build $Build -Marker "$($Release.tag_name)|$($asset.name)|$($asset.digest)" -Url $asset.browser_download_url -FileName $asset.name `
+            -VendorHashAlgorithm $vendorHashAlgorithm -VendorHash $vendorHash)
+}
+
+# The generic adapter for a tool released on GitHub.
+function Get-GitHubReleaseRemote {
+    param([string]$Repository, [string]$AssetPattern, [string]$Build = 'x64')
+    return (ConvertTo-GitHubAssetRemote -Release (Get-GitHubLatestRelease -Repository $Repository) -AssetPattern $AssetPattern -Build $Build)
 }
 
 # The account's Downloads folder (the known folder, wherever it was moved;
@@ -1324,11 +1524,15 @@ function Get-ArsenalRemote {
 
 function Get-ToolRemote {
     param($CatalogueTool)
+    $build = 'x64'
+    if ($CatalogueTool.Build) { $build = $CatalogueTool.Build }
     switch ($CatalogueTool.Source) {
         'EZTools'       { return (Get-EzToolRemote -CatalogueTool $CatalogueTool) }
         'NirSoft'       { return (Get-NirSoftRemote -CatalogueTool $CatalogueTool) }
         'Sysinternals'  { return (Get-SysinternalsRemote -CatalogueTool $CatalogueTool) }
         'ArsenalRecon'  { return (Get-ArsenalRemote -CatalogueTool $CatalogueTool) }
+        'DirectUrl'     { return (Get-DirectUrlRemote -Url $CatalogueTool.Package -FileName ([System.IO.Path]::GetFileName(([uri]$CatalogueTool.Package).AbsolutePath)) -Build $build) }
+        'GitHubRelease' { return (Get-GitHubReleaseRemote -Repository $CatalogueTool.Package -AssetPattern $CatalogueTool.AssetPattern -Build $build) }
     }
     throw "unknown source '$($CatalogueTool.Source)' for $($CatalogueTool.Name)"
 }
@@ -1614,15 +1818,40 @@ function Expand-VerifiedZip {
 function Copy-ZipEntryHashed {
     param($Entry, [string]$Target, [string]$RelativePath)
     $source = $null
+    try {
+        $source = $Entry.Open()
+        return (Copy-StreamHashed -Source $source -Target $Target -RelativePath $RelativePath)
+    } finally {
+        if ($source) { try { $source.Dispose() } catch {} }
+    }
+}
+
+# A downloaded file that is the tool (no zip: SRUM-DUMP's exe), copied into
+# the new folder and hashed as it is written, as a zip's entries are.
+# Returns the one file: RelativePath, Length, Sha256.
+function Copy-DownloadedFileHashed {
+    param([string]$SourcePath, [string]$Destination)
+    $fileName = [System.IO.Path]::GetFileName($SourcePath)
+    $source = $null
+    try {
+        $source = [System.IO.File]::OpenRead($SourcePath)
+        return @(Copy-StreamHashed -Source $source -Target (Join-Path $Destination $fileName) -RelativePath $fileName)
+    } finally {
+        if ($source) { try { $source.Dispose() } catch {} }
+    }
+}
+
+# Write a stream to a file, hashing it on the way.
+function Copy-StreamHashed {
+    param($Source, [string]$Target, [string]$RelativePath)
     $output = $null
     $hasher = $null
     try {
-        $source = $Entry.Open()
         $output = [System.IO.File]::Create($Target)
         $hasher = [System.Security.Cryptography.SHA256]::Create()
         $buffer = New-Object byte[] 1048576
         $length = 0L
-        while (($read = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
+        while (($read = $Source.Read($buffer, 0, $buffer.Length)) -gt 0) {
             $output.Write($buffer, 0, $read)
             $null = $hasher.TransformBlock($buffer, 0, $read, $null, 0)
             $length += $read
@@ -1633,7 +1862,6 @@ function Copy-ZipEntryHashed {
     } finally {
         if ($hasher) { try { $hasher.Dispose() } catch {} }
         if ($output) { try { $output.Dispose() } catch {} }
-        if ($source) { try { $source.Dispose() } catch {} }
     }
 }
 
@@ -1938,6 +2166,191 @@ function Uninstall-PrerequisiteVersion {
     return "$($Prerequisite.DisplayName) $Version removed (exit code $exitCode)"
 }
 
+# --- The script itself ---
+
+# The command line that runs a copy of this script again with this run's
+# selection: the relaunches (elevated; the new version after a
+# self-update). -Pause keeps the new window open; -NoSelfUpdate stops the
+# new version checking again; -ElevatedRelaunch marks the elevated
+# relaunch, so a relaunched run that still isn't elevated stops instead of
+# relaunching once more.
+function Get-RelaunchArgumentList {
+    param([string]$ScriptPath, [bool]$PauseAtExit, [bool]$NoSelfUpdate, [bool]$ElevatedRelaunch = $false)
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
+    # One quoted value per selection: -File passes each argument as one
+    # string (the run splits it on commas), and a category name has spaces.
+    if ($script:Family.Count -gt 0) { $arguments += " -Family `"$($script:Family -join ',')`"" }
+    if ($script:Category.Count -gt 0) { $arguments += " -Category `"$($script:Category -join ',')`"" }
+    if ($script:Tool.Count -gt 0) { $arguments += " -Tool `"$($script:Tool -join ',')`"" }
+    if ($PauseAtExit) { $arguments += ' -Pause' }
+    if ($NoSelfUpdate) { $arguments += ' -NoSelfUpdate' }
+    if ($ElevatedRelaunch) { $arguments += ' -ElevatedRelaunch' }
+    return $arguments
+}
+
+# Run this script again elevated (Windows asks through UAC) and wait for
+# it; its output is in its own window, kept open at the end. Returns its
+# exit code, or $null when the user declined.
+function Invoke-ElevatedRelaunch {
+    $arguments = Get-RelaunchArgumentList -ScriptPath $PSCommandPath -PauseAtExit $true -NoSelfUpdate $script:NoSelfUpdate.IsPresent -ElevatedRelaunch $true
+    try {
+        $process = Start-Process -FilePath (Get-PowerShellPath) -ArgumentList $arguments -Verb RunAs -Wait -PassThru -ErrorAction Stop
+    } catch {
+        if ($_.Exception.Message -like '*cancel*') { return $null }
+        throw
+    }
+    return $process.ExitCode
+}
+
+# Hand this run over to the new version just installed: run it in this
+# window with this run's selection, and return its exit code.
+function Invoke-ScriptRelaunch {
+    param([string]$ScriptPath)
+    $arguments = Get-RelaunchArgumentList -ScriptPath $ScriptPath -PauseAtExit $script:pauseAtExit -NoSelfUpdate $true
+    $process = Start-Process -FilePath (Get-PowerShellPath) -ArgumentList $arguments -NoNewWindow -Wait -PassThru -ErrorAction Stop
+    return $process.ExitCode
+}
+
+# Open a web page in the default browser at the desktop's own rights, not
+# this run's elevation: the address is handed to Explorer, which opens it
+# as the logged-on user would. Only https addresses from CONFIG reach here.
+function Open-PageInDefaultBrowser {
+    param([string]$Url)
+    if ($Url -notmatch '^https://') { throw "refused to open $Url (not an https address)" }
+    Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList $Url -ErrorAction Stop
+}
+
+# The version line of a copy of this script, or '' where there is none.
+function Get-ScriptVersionFromFile {
+    param([string]$Path)
+    $match = [regex]::Match([System.IO.File]::ReadAllText($Path), '(?m)^\$WorkstationVersion = ''([^'']+)''')
+    if ($match.Success) { return $match.Groups[1].Value }
+    return ''
+}
+
+# Whether two paths name the same file.
+function Test-SamePath {
+    param([string]$First, [string]$Second)
+    return ([System.IO.Path]::GetFullPath($First).TrimEnd('\') -ieq [System.IO.Path]::GetFullPath($Second).TrimEnd('\'))
+}
+
+# The SHA-256 GitHub publishes for this script's release of a version (the
+# asset's digest), or '' where that version has no release. Any other
+# failure throws, so the check is unknown rather than "not released".
+function Get-ReleasedScriptSha256 {
+    param([string]$Version)
+    $release = $null
+    try {
+        $release = Get-GitHubJson -Path "/repos/$($script:SelfUpdateRepository)/releases/tags/v$Version"
+    } catch [System.Net.WebException] {
+        $httpResponse = $_.Exception.Response
+        if ($httpResponse -and [int]$httpResponse.StatusCode -eq 404) { return '' }
+        throw
+    }
+    $remote = ConvertTo-GitHubAssetRemote -Release $release -AssetPattern $script:SelfUpdateAssetPattern
+    if ($remote.Available -and $remote.VendorHashAlgorithm -eq 'SHA256') { return $remote.VendorHash }
+    return ''
+}
+
+# The SHA-256 a release's notes state for the script, or '' where the
+# notes have no such line.
+function Get-ReleaseNotesSha256 {
+    param($Release)
+    $match = [regex]::Match([string]$Release.body, $script:SelfUpdateNotesHashPattern)
+    if ($match.Success) { return $match.Groups[1].Value.ToLowerInvariant() }
+    return ''
+}
+
+# This script's own situation: the protected copy under the install root
+# (CopyAction: Install, Replace, NewerInstalled or '' for nothing to do)
+# and the latest release (ReleaseStatus: Current, Changed, NotReleased,
+# Off or Unknown, with Detail and Remote).
+function Get-ScriptCheck {
+    param([string]$RunningPath, [string]$RunningSha256, [bool]$SelfUpdateAllowed)
+    $protectedPath = Join-Path $script:installRoot $script:ProtectedScriptName
+    $check = [pscustomobject]@{
+        ProtectedPath = $protectedPath; RunningIsProtected = (Test-SamePath -First $RunningPath -Second $protectedPath)
+        ProtectedVersion = ''; CopyAction = ''; Remote = $null; Release = $null; ReleaseStatus = ''; Detail = ''
+    }
+    if ([System.IO.File]::Exists($protectedPath)) {
+        $check.ProtectedVersion = Get-ScriptVersionFromFile -Path $protectedPath
+        if (-not $check.RunningIsProtected -and (Get-FileHashHex -Path $protectedPath) -ne $RunningSha256) {
+            $protectedVersion = ConvertTo-VersionOrNull -Text $check.ProtectedVersion
+            $runningVersion = ConvertTo-VersionOrNull -Text $script:WorkstationVersion
+            if ($protectedVersion -and $runningVersion -and $protectedVersion -gt $runningVersion) { $check.CopyAction = 'NewerInstalled' } else { $check.CopyAction = 'Replace' }
+        }
+    } elseif (-not $check.RunningIsProtected) {
+        $check.CopyAction = 'Install'
+    }
+    if (-not $SelfUpdateAllowed) {
+        $check.ReleaseStatus = 'Off'; $check.Detail = "self-update off; this copy is $($script:WorkstationVersion)"
+        return $check
+    }
+    try {
+        $check.Release = Get-GitHubLatestRelease -Repository $script:SelfUpdateRepository
+        $check.Remote = ConvertTo-GitHubAssetRemote -Release $check.Release -AssetPattern $script:SelfUpdateAssetPattern -Build 'script'
+        if (-not $check.Remote.Available) {
+            $check.ReleaseStatus = 'Unknown'; $check.Detail = "can't check for a newer release: $($check.Remote.Detail)"
+            return $check
+        }
+        $latest = ConvertTo-VersionOrNull -Text $check.Remote.Version
+        $running = ConvertTo-VersionOrNull -Text $script:WorkstationVersion
+        if (-not $latest -or -not $running -or $latest -le $running) {
+            $check.ReleaseStatus = 'Current'; $check.Detail = "current ($($script:WorkstationVersion))"
+        } elseif ((Get-ReleasedScriptSha256 -Version $script:WorkstationVersion) -eq $RunningSha256) {
+            $check.ReleaseStatus = 'Changed'; $check.Detail = "$($check.Remote.Version) available (this copy is $($script:WorkstationVersion))"
+        } else {
+            $check.ReleaseStatus = 'NotReleased'; $check.Detail = "$($check.Remote.Version) is out, but this copy isn't the released $($script:WorkstationVersion) (its SHA-256 differs, or that version was never released): self-update is off for it"
+        }
+    } catch {
+        $check.ReleaseStatus = 'Unknown'; $check.Detail = "can't check for a newer release: $(Get-OneLineMessage -ErrorRecord $_)"
+    }
+    return $check
+}
+
+# Put a copy of this script in its place under the install root (written
+# beside it, then swapped in), without Mark of the Web, and record it.
+function Install-ScriptCopy {
+    param([string]$SourcePath, [string]$ProtectedPath, [string]$Version, [string]$Sha256, $Remote, $Download, $State)
+    $newPath = $ProtectedPath + '.new'
+    Copy-Item -LiteralPath $SourcePath -Destination $newPath -Force -ErrorAction Stop
+    Unblock-File -LiteralPath $newPath -ErrorAction Stop
+    if ([System.IO.File]::Exists($ProtectedPath)) { [System.IO.File]::Replace($newPath, $ProtectedPath, [NullString]::Value) } else { [System.IO.File]::Move($newPath, $ProtectedPath) }
+    $shortcuts = @()
+    if ($State.Script -and $State.Script.Shortcuts) { $shortcuts = @($State.Script.Shortcuts) }
+    $sourceUrl = ''
+    $marker = ''
+    $vendorHashAlgorithm = ''
+    $vendorHash = ''
+    $vendorHashMatched = 'not published'
+    if ($Remote) { $sourceUrl = $Remote.Url; $marker = $Remote.Marker; $vendorHashAlgorithm = $Remote.VendorHashAlgorithm; $vendorHash = $Remote.VendorHash; $vendorHashMatched = $Download.VendorHashMatched }
+    $State.Script = @{
+        Version = $Version; Sha256 = $Sha256; Path = $ProtectedPath; SourceUrl = $sourceUrl; Marker = $marker
+        VendorHashAlgorithm = $vendorHashAlgorithm; VendorHash = $vendorHash; VendorHashMatched = $vendorHashMatched
+        InstalledUtc = (Format-UtcTime -Time (Get-Date)); Shortcuts = $shortcuts
+    }
+}
+
+# Download the newer release, check it against GitHub's digest and the
+# notes' SHA-256 (they must agree), and install it as the protected copy.
+# Returns the result's detail; throws on failure.
+function Install-ScriptUpdate {
+    param($Check, $State)
+    $download = Save-VerifiedDownload -Remote $Check.Remote -StagingFolder $script:stagingFolder
+    try {
+        Write-ConsoleLine -Text "Downloaded $($Check.Remote.FileName) (SHA-256 $($download.Sha256); GitHub's digest: $($download.VendorHashMatched))" -Indent 4
+        if ($download.VendorHashMatched -ne 'yes') { throw "GitHub publishes no SHA-256 digest for $($Check.Remote.FileName): not installed" }
+        $notesSha256 = Get-ReleaseNotesSha256 -Release $Check.Release
+        if (-not $notesSha256) { throw "the release notes of $($Check.Remote.Version) state no SHA-256 for the script: not installed" }
+        if ($notesSha256 -ne $download.Sha256) { throw "the release notes of $($Check.Remote.Version) state SHA-256 $notesSha256, the file's is $($download.Sha256): not installed" }
+        Write-ConsoleLine -Text "The release notes' SHA-256 agrees." -Indent 4
+        Install-ScriptCopy -SourcePath $download.Path -ProtectedPath $Check.ProtectedPath -Version $Check.Remote.Version -Sha256 $download.Sha256 -Remote $Check.Remote -Download $download -State $State
+    } finally {
+        try { Remove-OwnedFile -Path $download.Path -Root $script:stagingFolder } catch {}
+    }
+    return "$($Check.Remote.Version) installed at $(Format-Unbreakable -Text $Check.ProtectedPath)"
+}
+
 # --- Tool actions ---
 
 # A tool's user data, relative to its folder: Folders (KeepPaths and
@@ -1986,15 +2399,51 @@ function Get-CatalogueRowFingerprint {
     try { return (($hasher.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join '') } finally { $hasher.Dispose() }
 }
 
-# The tool's folder under the install root.
+# The tool's folder under the install root, where the catalogue puts it
+# today: <Category>\<Tool>.
 function Get-ToolFolder {
     param($CatalogueTool)
-    return (Join-Path (Join-Path $script:installRoot $CatalogueTool.Family) $CatalogueTool.Name)
+    return (Join-Path (Join-Path $script:installRoot $CatalogueTool.Category) $CatalogueTool.Name)
+}
+
+# An installed tool's folder, where it is now (its record): the same as
+# Get-ToolFolder once it has been moved to its category's folder.
+function Get-ToolInstalledFolder {
+    param($Record)
+    return (Join-Path $script:installRoot $Record.Folder)
+}
+
+# Whether an installed tool is where the catalogue now puts it; where not,
+# an update moves it (Move-ToolFolder).
+function Test-ToolInPlace {
+    param($CatalogueTool, $Record)
+    return ((Get-ToolInstalledFolder -Record $Record).TrimEnd('\') -ieq (Get-ToolFolder -CatalogueTool $CatalogueTool).TrimEnd('\'))
+}
+
+# Remove the folder a tool's folder was in (its category's, or its family's
+# on a workstation built before 0.3.0) once nothing is left in it; a failure
+# is a warning, never a stop.
+function Remove-EmptyToolParentFolder {
+    param([string]$ToolFolder, [string]$ToolName)
+    $parentFolder = [System.IO.Path]::GetDirectoryName($ToolFolder)
+    try {
+        Assert-PathInside -Path $parentFolder -Root $script:installRoot
+        if ([System.IO.Directory]::Exists($parentFolder) -and @([System.IO.Directory]::GetFileSystemEntries($parentFolder)).Count -eq 0) { [System.IO.Directory]::Delete($parentFolder) }
+    } catch {
+        Add-RunWarning -Message "${ToolName}: the folder it was in, $(Format-Unbreakable -Text $parentFolder), now empty, could not be removed: $(Get-OneLineMessage -ErrorRecord $_)"
+    }
 }
 
 function Get-FamilyRow {
     param([string]$Name)
     return (@($script:Families | Where-Object { $_.Name -eq $Name }) | Select-Object -First 1)
+}
+
+# Whether two category names are the same, whatever their case and spaces
+# (-Category FileActivity selects File Activity).
+function Test-SameCategoryName {
+    param([string]$First, [string]$Second)
+    return (($First -replace ' ', '') -ieq ($Second -replace ' ', ''))
 }
 
 # The runtimeconfig.json embedded in a .NET single-file exe (see
@@ -2075,7 +2524,9 @@ function Test-ToolSigner {
         $exePath = Join-Path $Folder $exe
         if (-not [System.IO.File]::Exists($exePath)) { throw "$exe is missing" }
         $check = Test-SignerAccepted -SignerInfo (Get-SignerInfo -Path $exePath) -ExpectedSigner $familyRow.ExpectedSigner -UnsignedAllowed $familyRow.UnsignedAllowed
-        if (-not $check.Accepted) { throw "$exe is signed by $($check.Description), expected $($familyRow.ExpectedSigner)" }
+        $expectedText = $familyRow.ExpectedSigner
+        if (-not $expectedText) { $expectedText = 'unsigned (the catalogue names no signer for this family)' }
+        if (-not $check.Accepted) { throw "$exe is signed by $($check.Description), expected $expectedText" }
         "${exe}: $($check.Description)"
     }
     return @($descriptions)
@@ -2098,6 +2549,11 @@ function Get-ProcessRunningFrom {
 function Install-Tool {
     param($CatalogueTool, $Remote, $State, [switch]$Reinstall)
     $finalFolder = Get-ToolFolder -CatalogueTool $CatalogueTool
+    # An installed copy elsewhere (its category changed) is moved first
+    # (Move-ToolFolder); installing beside it would leave it behind.
+    if ($State.Tools.ContainsKey($CatalogueTool.Name) -and -not (Test-ToolInPlace -CatalogueTool $CatalogueTool -Record $State.Tools[$CatalogueTool.Name])) {
+        throw "its installed copy is still at $(Format-Unbreakable -Text (Get-ToolInstalledFolder -Record $State.Tools[$CatalogueTool.Name])), not moved: not updated"
+    }
     $newFolder = "$finalFolder.new"
     $oldFolder = "$finalFolder.old"
     Remove-OwnedFolder -Path $newFolder -Root $script:installRoot
@@ -2116,8 +2572,16 @@ function Install-Tool {
     }
     $null = [System.IO.Directory]::CreateDirectory($newFolder)
     try {
-        $files = @(Expand-VerifiedZip -ZipPath $download.Path -Destination $newFolder -IncludeOnly @($CatalogueTool.Files | Where-Object { $_ }) `
-                -Exclude @($CatalogueTool.ExcludeFiles | Where-Object { $_ }) -Keep @($CatalogueTool.KeepFiles | Where-Object { $_ }))
+        if ([System.IO.Path]::GetExtension($download.Path) -ieq '.zip') {
+            $files = @(Expand-VerifiedZip -ZipPath $download.Path -Destination $newFolder -IncludeOnly @($CatalogueTool.Files | Where-Object { $_ }) `
+                    -Exclude @($CatalogueTool.ExcludeFiles | Where-Object { $_ }) -Keep @($CatalogueTool.KeepFiles | Where-Object { $_ }))
+        } else {
+            # The download is the tool itself (one exe): Files, ExcludeFiles
+            # and KeepFiles pick from a zip and don't apply.
+            $pickers = @(@($CatalogueTool.Files) + @($CatalogueTool.ExcludeFiles) + @($CatalogueTool.KeepFiles) | Where-Object { $_ })
+            if ($pickers.Count -gt 0) { throw "its download is one file ($($Remote.FileName)), but its catalogue row picks files from a zip (Files, ExcludeFiles or KeepFiles)" }
+            $files = @(Copy-DownloadedFileHashed -SourcePath $download.Path -Destination $newFolder)
+        }
         $problems = @(Test-ExtractedFile -Folder $newFolder -Files $files)
         if ($problems.Count -gt 0) { throw ("files did not survive extraction (antivirus?): " + ($problems -join '; ')) }
 
@@ -2193,7 +2657,7 @@ function Install-Tool {
         if (-not $version) { $version = [string]$versionInfo.FileVersion }
     }
     return @{
-        Family = $CatalogueTool.Family; Folder = (Get-RelativePath -Path $finalFolder -Root $script:installRoot); Version = $version; Build = $Remote.Build
+        Family = $CatalogueTool.Family; Category = $CatalogueTool.Category; Folder = (Get-RelativePath -Path $finalFolder -Root $script:installRoot); Version = $version; Build = $Remote.Build
         Marker = $Remote.Marker; SourceUrl = $Remote.Url; DownloadSha256 = $download.Sha256; VendorHashAlgorithm = $Remote.VendorHashAlgorithm
         VendorHash = $Remote.VendorHash; VendorHashMatched = $download.VendorHashMatched; Signer = ($signerDescriptions -join '; ')
         CatalogueFingerprint = (Get-CatalogueRowFingerprint -CatalogueTool $CatalogueTool)
@@ -2203,14 +2667,30 @@ function Install-Tool {
 }
 
 # Remove a tool the script installed: its folder (PATH entries and shortcuts
-# are reconciled afterwards).
+# are reconciled afterwards). The folder is renamed aside first, as the
+# update's swap does, so a folder Windows won't rename (held by another
+# process, e.g. as its working folder) is left whole, as in use, never
+# emptied file by file and left half there. A renamed copy that can't be
+# deleted is a leftover, removed at the start of the next run.
 function Remove-Tool {
     param([string]$Name, $State)
     $record = $State.Tools[$Name]
     $folder = Join-Path $script:installRoot $record.Folder
     $running = @(Get-ProcessRunningFrom -Folder $folder)
     if ($running.Count -gt 0) { throw [System.InvalidOperationException]::new("in use, not removed (close it and run again): $($running -join ', ')") }
-    Remove-OwnedFolder -Path $folder -Root $script:installRoot
+    if ([System.IO.Directory]::Exists($folder)) {
+        Assert-PathInside -Path $folder -Root $script:installRoot
+        $oldFolder = "$folder.old"
+        Remove-OwnedFolder -Path $oldFolder -Root $script:installRoot
+        try {
+            [System.IO.Directory]::Move($folder, $oldFolder)
+        } catch {
+            throw [System.InvalidOperationException]::new("in use, not removed (close it and run again): $(Get-OneLineMessage -ErrorRecord $_)")
+        }
+        try { Remove-OwnedFolder -Path $oldFolder -Root $script:installRoot }
+        catch { Add-RunWarning -Message "${Name}: its removed copy could not be deleted ($(Format-Unbreakable -Text $oldFolder)); the next run removes it." }
+    }
+    Remove-EmptyToolParentFolder -ToolFolder $folder -ToolName $Name       # its category's folder goes too once no tool is left in it
     $removedShortcuts = 0
     foreach ($shortcut in @($record.Shortcuts)) {
         try { Remove-OwnedShortcut -Path $shortcut; $removedShortcuts++ } catch { Add-RunWarning -Message "${Name}: shortcut $(Format-Unbreakable -Text $shortcut) could not be removed: $(Get-OneLineMessage -ErrorRecord $_)" }
@@ -2224,6 +2704,37 @@ function Remove-Tool {
     return $detail
 }
 
+# Move an installed tool to where the catalogue now puts it (its category
+# changed, or the workstation was built before 0.3.0, by family): the folder
+# is renamed as it is, so its files, user data and grants come with it and
+# nothing is downloaded. Its shortcuts are removed (new ones are made in the
+# run's PATH and shortcuts step), its old PATH entry likewise, and the folder
+# it was in when that is left empty. A tool in use stays where it is.
+function Move-ToolFolder {
+    param($CatalogueTool, $State)
+    $record = $State.Tools[$CatalogueTool.Name]
+    $fromFolder = Get-ToolInstalledFolder -Record $record
+    $toFolder = Get-ToolFolder -CatalogueTool $CatalogueTool
+    Assert-PathInside -Path $fromFolder -Root $script:installRoot
+    Assert-PathInside -Path $toFolder -Root $script:installRoot
+    $running = @(Get-ProcessRunningFrom -Folder $fromFolder)
+    if ($running.Count -gt 0) { throw [System.InvalidOperationException]::new("in use, not moved (close it and run again): $($running -join ', ')") }
+    if ([System.IO.Directory]::Exists($toFolder)) { throw "a folder is already at $(Format-Unbreakable -Text $toFolder): not moved" }
+    $null = [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($toFolder))
+    [System.IO.Directory]::Move($fromFolder, $toFolder)
+    $removedShortcuts = 0
+    foreach ($shortcut in @($record.Shortcuts)) {
+        try { Remove-OwnedShortcut -Path $shortcut; $removedShortcuts++ } catch { Add-RunWarning -Message "$($CatalogueTool.Name): its old shortcut $(Format-Unbreakable -Text $shortcut) could not be removed: $(Get-OneLineMessage -ErrorRecord $_)" }
+    }
+    $record.Shortcuts = @()
+    $record.Folder = Get-RelativePath -Path $toFolder -Root $script:installRoot
+    $record.Category = $CatalogueTool.Category
+    Remove-EmptyToolParentFolder -ToolFolder $fromFolder -ToolName $CatalogueTool.Name
+    $detail = 'moved as it was (files, settings and grants)'
+    if ($removedShortcuts -gt 0) { $detail += "; $removedShortcuts old shortcut(s) removed, made again under PATH and shortcuts" }
+    return $detail
+}
+
 # Sync a tool's ancillary content with its own --sync. The content folder is
 # moved aside first, since --sync never removes a file retired upstream; on
 # success the old folder is deleted and the differences counted, on failure
@@ -2231,7 +2742,8 @@ function Remove-Tool {
 function Sync-AncillaryContent {
     param($AncillaryRow, $Remote, $State)
     $catalogueTool = @($script:Catalogue | Where-Object { $_.Name -eq $AncillaryRow.Tool }) | Select-Object -First 1
-    $toolFolder = Get-ToolFolder -CatalogueTool $catalogueTool
+    if (-not $State.Tools.ContainsKey($AncillaryRow.Tool)) { throw "$($AncillaryRow.Tool) is not installed" }
+    $toolFolder = Get-ToolInstalledFolder -Record $State.Tools[$AncillaryRow.Tool]
     $exePath = Join-Path $toolFolder $catalogueTool.Cli[0]
     if (-not [System.IO.File]::Exists($exePath)) { throw "$($AncillaryRow.Tool) is not installed" }
     $contentFolder = Join-Path $toolFolder $AncillaryRow.Folder
@@ -2320,11 +2832,13 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
 }
 
 # Bring the machine PATH in line with the installed command-line tools: add
-# each CLI tool's folder; in a full run, remove entries under the install
-# root that no installed tool needs. A tool dropped from the catalogue but
-# still installed (its removal refused or failed) keeps its entry until it is
-# removed. Two tools exposing the same exe name are refused (the second is
-# not added). Returns result lines.
+# each CLI tool's folder (where it is now); in a full run, remove entries
+# under the install root that no installed tool needs; in any run, remove an
+# entry under it whose folder is gone (a tool moved to its category's
+# folder). A tool dropped from the catalogue but still installed (its
+# removal refused or failed) keeps its entry until it is removed. Two tools
+# exposing the same exe name are refused (the second is not added). Returns
+# result lines.
 function Update-MachinePath {
     param($State, [bool]$AllowRemoval)
     $wanted = New-Object System.Collections.Generic.List[string]
@@ -2333,7 +2847,7 @@ function Update-MachinePath {
     foreach ($catalogueTool in $script:Catalogue) {
         if (@($catalogueTool.Cli).Count -eq 0 -or -not $State.Tools.ContainsKey($catalogueTool.Name)) { continue }
         if (Test-ToolFolderWritable -CatalogueTool $catalogueTool) { $refused.Add("$($catalogueTool.Name): its folder is writable by the account, so it is never put on PATH"); continue }
-        $folder = Get-ToolFolder -CatalogueTool $catalogueTool
+        $folder = Get-ToolInstalledFolder -Record $State.Tools[$catalogueTool.Name]
         $clash = $null
         foreach ($exe in @(Get-ChildItem -LiteralPath $folder -Filter '*.exe' -File -ErrorAction SilentlyContinue)) {
             $exeName = $exe.Name.ToLowerInvariant()
@@ -2353,7 +2867,9 @@ function Update-MachinePath {
         $isOurs = $entry -ne '' -and $entry.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)
         $isWanted = [bool]($wanted | Where-Object { $_ -ieq $entry.TrimEnd('\') })
         $isStillInstalled = [bool]($stillInstalledNotInCatalogue | Where-Object { $_ -ieq $entry.TrimEnd('\') })
+        $isGone = $isOurs -and -not [System.IO.Directory]::Exists($entry)
         if ($isOurs -and $AllowRemoval -and -not $isWanted -and -not $isStillInstalled) { continue }
+        if ($isGone -and -not $isWanted) { continue }
         if ($isOurs -and -not $isWanted -and $isStillInstalled) { $keptForInstalled.Add([System.IO.Path]::GetFileName($entry.TrimEnd('\'))) }
         $entry
     }
@@ -2379,18 +2895,26 @@ function Update-MachinePath {
     return [pscustomobject]@{ Lines = $lines.ToArray(); Refused = $refused.ToArray() }
 }
 
-# Where a GUI tool's shortcuts go: the Desktop and the Start Menu, in the
-# family's folder when the family has several GUI tools, else directly (and
-# directly for a row with ShortcutOutsideFolder). The Desktop and the Start
-# Menu are always laid out alike.
+# Where a GUI tool's shortcuts go: the Desktop and the Start Menu, in its
+# category's folder (directly for a row with ShortcutOutsideFolder). The
+# Desktop and the Start Menu are always laid out alike.
 function Get-ShortcutPath {
     param($CatalogueTool)
-    $familyRow = Get-FamilyRow -Name $CatalogueTool.Family
-    $guiCount = @($script:Catalogue | Where-Object { $_.Family -eq $CatalogueTool.Family -and $_.Gui }).Count
     $paths = foreach ($base in @($script:desktopFolder, $script:startMenuFolder)) {
-        if ($guiCount -le 1 -or $CatalogueTool.ShortcutOutsideFolder) { Join-Path $base "$($CatalogueTool.DisplayName).lnk" } else { Join-Path (Join-Path $base $familyRow.ShortcutFolder) "$($CatalogueTool.DisplayName).lnk" }
+        if ($CatalogueTool.ShortcutOutsideFolder) { Join-Path $base "$($CatalogueTool.DisplayName).lnk" } else { Join-Path (Join-Path $base $CatalogueTool.Category) "$($CatalogueTool.DisplayName).lnk" }
     }
     return @($paths)
+}
+
+# The script's own shortcut: directly on the Desktop and in the Start Menu.
+function Get-ScriptShortcutPath {
+    return @(foreach ($base in @($script:desktopFolder, $script:startMenuFolder)) { Join-Path $base "$($script:ScriptShortcutName).lnk" })
+}
+
+# Windows PowerShell 5.1's own path: the shortcut's target, and the
+# relaunches'.
+function Get-PowerShellPath {
+    return (Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe')
 }
 
 # Remove a shortcut the script made: only .lnk files on the Desktop or in
@@ -2404,23 +2928,47 @@ function Remove-OwnedShortcut {
     if ([System.IO.File]::Exists($Path)) { [System.IO.File]::Delete($Path) }
 }
 
+# Whether a shortcut is set to run as administrator ($ShortcutRunAsUserFlag).
+function Test-ShortcutRunsElevated {
+    param([string]$Path)
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt $script:ShortcutHeaderSize) { throw "$(Format-Unbreakable -Text $Path) is too short to be a shortcut" }
+    return (([BitConverter]::ToUInt32($bytes, $script:ShortcutLinkFlagsOffset) -band $script:ShortcutRunAsUserFlag) -ne 0)
+}
+
+# Set or clear a shortcut's "Run as administrator" in its header.
+function Set-ShortcutRunsElevated {
+    param([string]$Path, [bool]$RunsElevated)
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt $script:ShortcutHeaderSize) { throw "$(Format-Unbreakable -Text $Path) is too short to be a shortcut" }
+    $flags = [BitConverter]::ToUInt32($bytes, $script:ShortcutLinkFlagsOffset)
+    $runAsUser = [uint32]$script:ShortcutRunAsUserFlag
+    if ($RunsElevated) { $flags = [uint32]($flags -bor $runAsUser) } else { $flags = [uint32]($flags -band ([uint32]::MaxValue - $runAsUser)) }
+    [Array]::Copy([BitConverter]::GetBytes([uint32]$flags), 0, $bytes, $script:ShortcutLinkFlagsOffset, 4)
+    [System.IO.File]::WriteAllBytes($Path, $bytes)
+}
+
 # Create one shortcut, or correct it: a shortcut that already has the
-# target, working folder and description is left as it is. Returns 'made',
-# 'corrected' or 'unchanged'; throws when it can't be saved.
+# target, arguments, working folder, description and "Run as administrator"
+# setting is left as it is. Returns 'made', 'corrected' or 'unchanged';
+# throws when it can't be saved.
 function Set-Shortcut {
-    param([string]$Path, [string]$Target, [string]$Description)
+    param([string]$Path, [string]$Target, [string]$Description, [string]$Arguments = '', [string]$WorkingDirectory = '', [bool]$RunsElevated = $false)
     $null = [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($Path))
-    $workingDirectory = [System.IO.Path]::GetDirectoryName($Target)
+    if (-not $WorkingDirectory) { $WorkingDirectory = [System.IO.Path]::GetDirectoryName($Target) }
     $existed = [System.IO.File]::Exists($Path)
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $null
     try {
         $shortcut = $shell.CreateShortcut($Path)        # reads the shortcut when it exists
-        if ($existed -and $shortcut.TargetPath -ieq $Target -and $shortcut.WorkingDirectory -ieq $workingDirectory -and $shortcut.Description -eq $Description) { return 'unchanged' }
+        $sameShortcut = $existed -and $shortcut.TargetPath -ieq $Target -and $shortcut.Arguments -eq $Arguments -and $shortcut.WorkingDirectory -ieq $WorkingDirectory -and $shortcut.Description -eq $Description
+        if ($sameShortcut -and (Test-ShortcutRunsElevated -Path $Path) -eq $RunsElevated) { return 'unchanged' }
         $shortcut.TargetPath = $Target
-        $shortcut.WorkingDirectory = $workingDirectory
+        $shortcut.Arguments = $Arguments
+        $shortcut.WorkingDirectory = $WorkingDirectory
         $shortcut.Description = $Description
         $shortcut.Save()
+        if ((Test-ShortcutRunsElevated -Path $Path) -ne $RunsElevated) { Set-ShortcutRunsElevated -Path $Path -RunsElevated $RunsElevated }
         if ($existed) { return 'corrected' }
         return 'made'
     } finally {
@@ -2432,7 +2980,8 @@ function Set-Shortcut {
 # Shortcuts for every installed GUI tool, each on its own (one that can't
 # be saved doesn't stop the others); in a full run, shortcuts the script
 # made that are no longer wanted (a tool's layout changed) are removed, and
-# empty family folders with them. A tool's record lists its shortcuts that
+# empty shortcut folders the script made with them (a category's; a
+# family's, from before 0.3.0). A tool's record lists its shortcuts that
 # exist. Returns Detail and Failures (one line each).
 function Update-ToolShortcut {
     param($State, [bool]$AllowRemoval)
@@ -2441,7 +2990,7 @@ function Update-ToolShortcut {
     foreach ($catalogueTool in $script:Catalogue) {
         if (-not $catalogueTool.Gui -or -not $State.Tools.ContainsKey($catalogueTool.Name)) { continue }
         $record = $State.Tools[$catalogueTool.Name]
-        $target = Join-Path (Get-ToolFolder -CatalogueTool $catalogueTool) $catalogueTool.Gui
+        $target = Join-Path (Get-ToolInstalledFolder -Record $record) $catalogueTool.Gui
         $wanted = @(Get-ShortcutPath -CatalogueTool $catalogueTool)
         foreach ($path in $wanted) {
             try {
@@ -2465,7 +3014,24 @@ function Update-ToolShortcut {
         }
         $record.Shortcuts = @(@($kept) + $wanted | Where-Object { [System.IO.File]::Exists($_) } | Sort-Object -Unique)
     }
-    $folders = @($script:Families | ForEach-Object { $name = $_.ShortcutFolder; foreach ($base in @($script:desktopFolder, $script:startMenuFolder)) { Join-Path $base $name } })
+    # The script's own shortcut, once its protected copy is installed: it
+    # runs that copy elevated (the shortcut asks through UAC) and keeps the
+    # window open at the end.
+    if ($State.Script -and $State.Script.Path) {
+        $wanted = @(Get-ScriptShortcutPath)
+        foreach ($path in $wanted) {
+            try {
+                $outcome = Set-Shortcut -Path $path -Target (Get-PowerShellPath) -Arguments ($script:ScriptShortcutArguments -f $State.Script.Path) `
+                    -WorkingDirectory $script:installRoot -Description 'Install and update the forensic tools (asks for administrator rights)' -RunsElevated $true
+                $counts[$outcome]++
+            } catch {
+                $failures.Add("the script's shortcut $(Format-Unbreakable -Text $path) not saved: $(Get-OneLineMessage -ErrorRecord $_)")
+            }
+        }
+        $State.Script.Shortcuts = @($wanted | Where-Object { [System.IO.File]::Exists($_) })
+    }
+    $categoryFolders = @($script:Categories | ForEach-Object { $name = $_; foreach ($base in @($script:desktopFolder, $script:startMenuFolder)) { Join-Path $base $name } })
+    $folders = @(@($categoryFolders) + @($State.ShortcutFolders) | Sort-Object -Unique)
     if ($AllowRemoval) {
         foreach ($folder in $folders) {
             if ([System.IO.Directory]::Exists($folder) -and @([System.IO.Directory]::GetFileSystemEntries($folder)).Count -eq 0 -and $State.ShortcutFolders -contains $folder) {
@@ -2507,8 +3073,13 @@ function Get-InventoryLine {
     $lines.Add((ConvertTo-CsvLine -Cells $script:InventoryColumns))
     foreach ($name in ($State.Tools.Keys | Sort-Object)) {
         $record = $State.Tools[$name]
-        $lines.Add((ConvertTo-CsvLine -Cells @('Tool', $record.Family, $name, $record.Version, $record.Build, 'yes', $record.SourceUrl, $record.DownloadSha256,
+        $lines.Add((ConvertTo-CsvLine -Cells @('Tool', $record.Family, [string]$record.Category, $name, $record.Version, $record.Build, 'yes', $record.SourceUrl, $record.DownloadSha256,
                     $record.VendorHashAlgorithm, $record.VendorHash, $record.VendorHashMatched, $record.Signer, $record.Marker, $record.InstalledUtc, (Join-Path $script:installRoot $record.Folder))))
+    }
+    if ($State.Script -and $State.Script.Path) {
+        $scriptRecord = $State.Script
+        $lines.Add((ConvertTo-CsvLine -Cells @('Script', '', '', $script:ProtectedScriptName, $scriptRecord.Version, '', 'yes', $scriptRecord.SourceUrl, $scriptRecord.Sha256,
+                    $scriptRecord.VendorHashAlgorithm, $scriptRecord.VendorHash, $scriptRecord.VendorHashMatched, 'unsigned', $scriptRecord.Marker, $scriptRecord.InstalledUtc, $scriptRecord.Path)))
     }
     foreach ($id in ($State.Prerequisites.Keys | Sort-Object)) {
         $prerequisiteRecord = $State.Prerequisites[$id]
@@ -2519,19 +3090,21 @@ function Get-InventoryLine {
             $versionRecord = $prerequisiteRecord.Versions[$version]
             $versionMarker = $version
             if ($changeMarker) { $versionMarker = $changeMarker }
-            $lines.Add((ConvertTo-CsvLine -Cells @('Prerequisite', '', $prerequisiteRecord.DisplayName, $version, 'x64', 'yes', $versionRecord.SourceUrl, $versionRecord.InstallerSha256,
+            $lines.Add((ConvertTo-CsvLine -Cells @('Prerequisite', '', '', $prerequisiteRecord.DisplayName, $version, 'x64', 'yes', $versionRecord.SourceUrl, $versionRecord.InstallerSha256,
                         $versionRecord.VendorHashAlgorithm, $versionRecord.VendorHash, $versionRecord.VendorHashMatched, $versionRecord.Signer, $versionMarker, $versionRecord.InstalledUtc, '')))
         }
     }
     foreach ($present in $script:prerequisitesNotOwned) {
-        $lines.Add((ConvertTo-CsvLine -Cells @('Prerequisite', '', $present.DisplayName, $present.Version, '', 'no', '', '', '', '', '', '', '', '', '')))
+        $lines.Add((ConvertTo-CsvLine -Cells @('Prerequisite', '', '', $present.DisplayName, $present.Version, '', 'no', '', '', '', '', '', '', '', '', '')))
     }
     foreach ($toolName in ($State.Ancillary.Keys | Sort-Object)) {
         $ancillaryRecord = $State.Ancillary[$toolName]
         $row = @($script:AncillaryContent | Where-Object { $_.Tool -eq $toolName }) | Select-Object -First 1
         $description = $toolName
         if ($row) { $description = $row.Description }
-        $lines.Add((ConvertTo-CsvLine -Cells @('Ancillary', 'Zimmerman', $description, $ancillaryRecord.Commit, '', 'yes', $ancillaryRecord.CommitUrl, '', '', '', '', '', $ancillaryRecord.Commit, $ancillaryRecord.SyncedUtc, '')))
+        $category = ''
+        if ($State.Tools.ContainsKey($toolName)) { $category = [string]$State.Tools[$toolName].Category }
+        $lines.Add((ConvertTo-CsvLine -Cells @('Ancillary', 'Zimmerman', $category, $description, $ancillaryRecord.Commit, '', 'yes', $ancillaryRecord.CommitUrl, '', '', '', '', '', $ancillaryRecord.Commit, $ancillaryRecord.SyncedUtc, '')))
     }
     return $lines.ToArray()
 }
@@ -2546,15 +3119,21 @@ function Get-FileRecordLine {
     foreach ($name in ($State.Tools.Keys | Sort-Object)) {
         $record = $State.Tools[$name]
         foreach ($file in @($record.Files)) {
-            $lines.Add((ConvertTo-CsvLine -Cells @($record.Family, $name, $file.Class, (Join-Path $record.Folder $file.RelativePath), $file.Length, $file.Sha256, $record.InstalledUtc)))
+            $lines.Add((ConvertTo-CsvLine -Cells @($record.Family, [string]$record.Category, $name, $file.Class, (Join-Path $record.Folder $file.RelativePath), $file.Length, $file.Sha256, $record.InstalledUtc)))
         }
         $catalogueTool = @($script:Catalogue | Where-Object { $_.Name -eq $name }) | Select-Object -First 1
         if ($catalogueTool) {
             $userData = Get-ToolUserDataPath -CatalogueTool $catalogueTool
             foreach ($userDataPath in @($userData.Folders) + @($userData.Files)) {
-                $lines.Add((ConvertTo-CsvLine -Cells @($record.Family, $name, 'UserData', (Join-Path $record.Folder $userDataPath), '', '', $record.InstalledUtc)))
+                $lines.Add((ConvertTo-CsvLine -Cells @($record.Family, [string]$record.Category, $name, 'UserData', (Join-Path $record.Folder $userDataPath), '', '', $record.InstalledUtc)))
             }
         }
+    }
+    # The protected copy of this script, verified like a vendor file.
+    if ($State.Script -and $State.Script.Path) {
+        $length = 0
+        try { $length = (Get-Item -LiteralPath $State.Script.Path -ErrorAction Stop).Length } catch {}
+        $lines.Add((ConvertTo-CsvLine -Cells @('Script', '', $script:ProtectedScriptName, 'Vendor', (Get-RelativePath -Path $State.Script.Path -Root $script:installRoot), $length, $State.Script.Sha256, $State.Script.InstalledUtc)))
     }
     return $lines.ToArray()
 }
@@ -2571,7 +3150,10 @@ function Invoke-Verification {
     foreach ($group in $byTool) {
         $toolName = $group.Name
         if ($ToolNames -notcontains $toolName) { continue }
-        $familyName = $group.Group[0].Family
+        # The result's group: the tool's category, or its family in a
+        # files.csv written before 0.3.0 (no Category column).
+        $groupName = [string]$group.Group[0].Category
+        if (-not $groupName) { $groupName = $group.Group[0].Family }
         $missing = New-Object System.Collections.Generic.List[string]
         $changed = New-Object System.Collections.Generic.List[string]
         $recorded = @{}
@@ -2584,7 +3166,12 @@ function Invoke-Verification {
         }
         $catalogueTool = @($script:Catalogue | Where-Object { $_.Name -eq $toolName }) | Select-Object -First 1
         $extra = New-Object System.Collections.Generic.List[string]
-        $toolFolder = Join-Path (Join-Path $script:installRoot $familyName) $toolName
+        # The tool's folder as files.csv has it: the two segments above its
+        # files (<Category>\<Tool>; <Family>\<Tool> before 0.3.0). The
+        # script's own row sits at the root and has no folder to scan.
+        $toolFolder = ''
+        $pathSegments = @([string]$group.Group[0].RelativePath -split '\\')
+        if ($pathSegments.Count -gt 2) { $toolFolder = Join-Path (Join-Path $script:installRoot $pathSegments[0]) $pathSegments[1] }
         $userDataFolders = @()
         $userDataFiles = @()
         if ($catalogueTool) {
@@ -2592,7 +3179,7 @@ function Invoke-Verification {
             $userDataFolders = $userData.Folders
             $userDataFiles = $userData.Files
         }
-        if ([System.IO.Directory]::Exists($toolFolder)) {
+        if ($toolFolder -and [System.IO.Directory]::Exists($toolFolder)) {
             foreach ($file in @(Get-ChildItem -LiteralPath $toolFolder -Recurse -File -Force)) {
                 $relativeToRoot = Get-RelativePath -Path $file.FullName -Root $script:installRoot
                 if ($recorded.ContainsKey($relativeToRoot.ToLowerInvariant())) { continue }
@@ -2604,13 +3191,13 @@ function Invoke-Verification {
         }
         $total = $verifiedRows.Count
         if ($missing.Count -gt 0 -or $changed.Count -gt 0) {
-            Add-Result -Group $familyName -Name $toolName -Status 'FAIL' -Detail "$($missing.Count) missing, $($changed.Count) changed of $total (see Failures)"
+            Add-Result -Group $groupName -Name $toolName -Status 'FAIL' -Detail "$($missing.Count) missing, $($changed.Count) changed of $total (see Failures)"
             foreach ($path in $missing) { Add-RunFailure -Message "missing: $path" }
             foreach ($path in $changed) { Add-RunFailure -Message "changed: $path" }
         } elseif ($extra.Count -gt 0) {
-            Add-Result -Group $familyName -Name $toolName -Status 'WARN' -Detail "$total of $total match; $($extra.Count) file(s) not on record (see Warnings)"
+            Add-Result -Group $groupName -Name $toolName -Status 'WARN' -Detail "$total of $total match; $($extra.Count) file(s) not on record (see Warnings)"
         } else {
-            Add-Result -Group $familyName -Name $toolName -Status 'PASS' -Detail "$total of $total files match files.csv"
+            Add-Result -Group $groupName -Name $toolName -Status 'PASS' -Detail "$total of $total files match files.csv"
         }
         foreach ($path in $extra) { Add-RunWarning -Message "not on record: $path" }
     }
@@ -2714,13 +3301,17 @@ $runFailures = New-Object System.Collections.Generic.List[string]
 $prerequisitesNotOwned = New-Object System.Collections.Generic.List[object]
 $ezIndex = $null
 $dotNetIndex = $null
+$gitHubReleasesByRepository = @{}
 $useColour = -not [Console]::IsOutputRedirected
+# The window closes with the run when Explorer started it (a shortcut,
+# "Run with PowerShell") or -Pause asks: every exit then waits for a key.
+$pauseAtExit = $Pause.IsPresent -or (Test-StartedFromExplorer)
 
 # -Confirm would make every cmdlet below ask before it acts; the run's plan
 # is shown by -CheckOnly instead.
 if ($PSBoundParameters.ContainsKey('Confirm')) {
     Write-Host 'Stopped: -Confirm is not supported. Run with -CheckOnly to see what an update would do.'
-    exit 3
+    Exit-Run -Code 3
 }
 # One dry run: -CheckOnly, or -WhatIf (ShouldProcess answers no under -WhatIf
 # and prints its own "What if" line).
@@ -2731,12 +3322,18 @@ $dryRun = $CheckOnly -or -not $PSCmdlet.ShouldProcess($env:COMPUTERNAME, 'Instal
 $WhatIfPreference = $false
 if ($dryRun -and $Verify) {
     Write-Host 'Stopped: -Verify and -CheckOnly (or -WhatIf) are separate modes; run one at a time.'
-    exit 3
+    Exit-Run -Code 3
 }
 $mode = 'update'
 if ($dryRun) { $mode = 'dry run (nothing is changed)' }
 if ($Verify) { $mode = 'verify (re-hash installed files)' }
-$selectionGiven = ($Family.Count -gt 0 -or $Tool.Count -gt 0)
+# A selection typed at a prompt arrives as an array; one passed through
+# -File (the shortcut, a relaunch) as one string, "a,b": each value is split
+# on commas, so both forms select the same.
+$Family = @($Family | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$Category = @($Category | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$Tool = @($Tool | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$selectionGiven = ($Family.Count -gt 0 -or $Category.Count -gt 0 -or $Tool.Count -gt 0)
 
 $elevated = Test-Elevated
 $osName = Get-OsName
@@ -2776,6 +3373,7 @@ $selectionText = 'every tool in the catalogue'
 if ($selectionGiven) {
     $selectionParts = @()
     if ($Family.Count -gt 0) { $selectionParts += "family $($Family -join ', ')" }
+    if ($Category.Count -gt 0) { $selectionParts += "category $($Category -join ', ')" }
     if ($Tool.Count -gt 0) { $selectionParts += "tool $($Tool -join ', ')" }
     $selectionText = ($selectionParts -join '; ') + ' (nothing is removed)'
 }
@@ -2789,18 +3387,47 @@ Write-LabelValue -Label 'Records' -Value (Format-Unbreakable -Text $recordsRoot)
 
 if ($osArchitecture -ne 'X64') { Stop-Run -Reason "this script is for amd64 (x64) Windows; this machine is $osArchitecture." }
 if (-not [Environment]::Is64BitProcess) { Stop-Run -Reason 'run it from 64-bit Windows PowerShell (this is the 32-bit one).' }
-if (-not $dryRun -and -not $Verify -and -not $elevated) { Stop-Run -Reason 'an update needs an elevated prompt (Run as administrator). -CheckOnly and -Verify do not.' }
+# An update without elevation runs itself again elevated: Windows asks
+# through UAC, the update runs in its own window (kept open at the end),
+# and this run ends with its exit code. Without a desktop to ask on, or
+# when the user declines, it stops.
+if (-not $dryRun -and -not $Verify -and -not $elevated) {
+    # Where Windows "elevates" without giving administrator rights (UAC
+    # turned off, a filtered token), the relaunch is no better than this
+    # run: it stops rather than relaunching again.
+    if ($ElevatedRelaunch) { Stop-Run -Reason "the elevated run didn't get administrator rights (UAC may be off for a filtered account): run it from an elevated prompt (Run as administrator)." }
+    if (-not [Environment]::UserInteractive) { Stop-Run -Reason 'an update needs administrator rights, and this session has no desktop for Windows to ask on. -CheckOnly and -Verify need none.' }
+    Write-ConsoleLine -Text ''
+    Write-ConsoleLine -Text 'An update needs administrator rights: Windows asks now (UAC). The update runs in its own window, kept open at the end.' -ContinuationIndent 2
+    $elevatedExitCode = $null
+    try { $elevatedExitCode = Invoke-ElevatedRelaunch } catch { Stop-Run -Reason "the elevated run could not be started: $(Get-OneLineMessage -ErrorRecord $_)" }
+    if ($null -eq $elevatedExitCode) { Stop-Run -Reason 'administrator rights were declined (UAC). -CheckOnly and -Verify need none.' }
+    Write-ConsoleLine -Text "The elevated run ended with exit code $elevatedExitCode; its output and log are its own."
+    Exit-Run -Code $elevatedExitCode
+}
 
-# The selection: every name must be in the catalogue.
+# The catalogue itself: every row's family and category must be in their
+# tables (an adapted copy's slip, caught before anything is done).
 $familyNames = @($Families | ForEach-Object { $_.Name })
+$catalogueProblems = @(foreach ($row in $Catalogue) {
+    if ($familyNames -notcontains $row.Family) { "$($row.Name): family '$($row.Family)' is not in `$Families" }
+    if ($Categories -notcontains $row.Category) { "$($row.Name): category '$($row.Category)' is not in `$Categories" }
+})
+if ($catalogueProblems.Count -gt 0) { Stop-Run -Reason 'the catalogue has rows naming a family or category that has no entry:' -List $catalogueProblems }
+
+# The selection: every name must be in the catalogue. A category may be
+# given without its spaces (FileActivity).
 $toolNames = @($Catalogue | ForEach-Object { $_.Name })
 $unknownFamilies = @($Family | Where-Object { $name = $_; -not ($familyNames | Where-Object { $_ -ieq $name }) })
+$unknownCategories = @($Category | Where-Object { $name = $_; -not ($Categories | Where-Object { Test-SameCategoryName -First $_ -Second $name }) })
 $unknownTools = @($Tool | Where-Object { $name = $_; -not ($toolNames | Where-Object { $_ -ieq $name }) })
 if ($unknownFamilies.Count -gt 0) { Stop-Run -Reason "unknown family: $($unknownFamilies -join ', '). The families are:" -List $familyNames }
+if ($unknownCategories.Count -gt 0) { Stop-Run -Reason "unknown category: $($unknownCategories -join ', '). The categories are:" -List $Categories }
 if ($unknownTools.Count -gt 0) { Stop-Run -Reason "unknown tool: $($unknownTools -join ', '). The tools are:" -List $toolNames }
 $selectedTools = @($Catalogue)
 if ($selectionGiven) {
-    $selectedTools = @($Catalogue | Where-Object { $row = $_; ($Family | Where-Object { $_ -ieq $row.Family }) -or ($Tool | Where-Object { $_ -ieq $row.Name }) })
+    $selectedTools = @($Catalogue | Where-Object { $row = $_
+            ($Family | Where-Object { $_ -ieq $row.Family }) -or ($Category | Where-Object { Test-SameCategoryName -First $_ -Second $row.Category }) -or ($Tool | Where-Object { $_ -ieq $row.Name }) })
 }
 
 try {
@@ -2826,12 +3453,14 @@ try {
 if ($Verify) {
     Write-SectionHeading -Title 'Verifying installed files against files.csv'
     try {
-        Invoke-Verification -FilesCsvPath (Join-Path $recordsRoot 'files.csv') -ToolNames @($selectedTools | ForEach-Object { $_.Name })
+        $verifiedNames = @($selectedTools | ForEach-Object { $_.Name })
+        if (-not $selectionGiven) { $verifiedNames += $ProtectedScriptName }     # the protected copy of this script, with everything
+        Invoke-Verification -FilesCsvPath (Join-Path $recordsRoot 'files.csv') -ToolNames $verifiedNames
     } catch {
         Add-Result -Group 'Verify' -Name 'files.csv' -Status 'FAIL' -Detail (Get-OneLineMessage -ErrorRecord $_)
     }
     $overall = Write-ResultBlock -Coverage 'every file installed by this script, re-hashed against files.csv'
-    switch ($overall) { 'PASS' { exit 0 } 'WARN' { exit 1 } default { exit 2 } }
+    switch ($overall) { 'PASS' { Exit-Run -Code 0 } 'WARN' { Exit-Run -Code 1 } default { Exit-Run -Code 2 } }
 }
 
 # --- TLS ---
@@ -2845,16 +3474,39 @@ try {
 }
 
 # --- Check every source ---
+# --- The script itself: its protected copy, and its latest release ---
+Write-SectionHeading -Title 'Script'
+$selfUpdateAllowed = (-not $NoSelfUpdate) -and [bool]$SelfUpdateRepository
+$scriptCheck = Get-ScriptCheck -RunningPath $PSCommandPath -RunningSha256 $scriptSha256 -SelfUpdateAllowed $selfUpdateAllowed
+$scriptCopyDetail = ''
+switch ($scriptCheck.CopyAction) {
+    'Install'        { $scriptCopyDetail = "no copy under $(Format-Unbreakable -Text $installRoot) yet: an update installs this file there, with its shortcut" }
+    'Replace'        { $scriptCopyDetail = "the copy under $(Format-Unbreakable -Text $installRoot) ($($scriptCheck.ProtectedVersion)) differs from this file: an update replaces it with this file" }
+    'NewerInstalled' { $scriptCopyDetail = "a newer copy ($($scriptCheck.ProtectedVersion)) is installed at $(Format-Unbreakable -Text $scriptCheck.ProtectedPath): run its shortcut; this run continues with $WorkstationVersion" }
+    default {
+        if ($scriptCheck.RunningIsProtected) { $scriptCopyDetail = "running the installed copy at $(Format-Unbreakable -Text $scriptCheck.ProtectedPath)" }
+        elseif ($scriptCheck.ProtectedVersion) { $scriptCopyDetail = "the installed copy at $(Format-Unbreakable -Text $scriptCheck.ProtectedPath) is this file" }
+    }
+}
+Write-CheckLine -Name 'This script' -Detail $scriptCheck.Detail
+if ($scriptCopyDetail) { Write-CheckLine -Name 'Installed copy' -Detail $scriptCopyDetail }
+if ($scriptCheck.CopyAction -eq 'NewerInstalled') { Add-RunWarning -Message "This copy ($WorkstationVersion) is older than the installed one ($($scriptCheck.ProtectedVersion)) at $(Format-Unbreakable -Text $scriptCheck.ProtectedPath): run its shortcut." }
+if ($scriptCheck.ReleaseStatus -eq 'Unknown') { Add-RunWarning -Message "This script: $($scriptCheck.Detail)" }
+
 Write-SectionHeading -Title 'Checking sources'
 $toolChecks = New-Object System.Collections.Generic.List[object]
 foreach ($catalogueTool in $selectedTools) {
     $record = $null
     if ($state.Tools.ContainsKey($catalogueTool.Name)) { $record = $state.Tools[$catalogueTool.Name] }
-    $check = [pscustomobject]@{ Tool = $catalogueTool; Record = $record; Remote = $null; Status = ''; Detail = '' }
+    # MoveFrom: the folder an installed tool is still in when the catalogue
+    # now puts it elsewhere (its category changed; a workstation built by
+    # family, before 0.3.0): an update moves it, whatever its source says.
+    $check = [pscustomobject]@{ Tool = $catalogueTool; Record = $record; Remote = $null; Status = ''; Detail = ''; MoveFrom = '' }
+    if ($record -and -not (Test-ToolInPlace -CatalogueTool $catalogueTool -Record $record)) { $check.MoveFrom = $record.Folder }
     try {
         $check.Remote = Get-ToolRemote -CatalogueTool $catalogueTool
         $entryPoint = @(@($catalogueTool.Gui) + @($catalogueTool.Cli) | Where-Object { $_ }) | Select-Object -First 1
-        $installedAndWhole = $record -and [System.IO.File]::Exists((Join-Path (Get-ToolFolder -CatalogueTool $catalogueTool) $entryPoint))
+        $installedAndWhole = $record -and [System.IO.File]::Exists((Join-Path (Get-ToolInstalledFolder -Record $record) $entryPoint))
         if (-not $check.Remote.Available) {
             $check.Status = 'Unavailable'; $check.Detail = $check.Remote.Detail
         } elseif (-not $record) {
@@ -2876,7 +3528,9 @@ foreach ($catalogueTool in $selectedTools) {
     } catch {
         $check.Status = 'Unknown'; $check.Detail = "can't check: $(Get-OneLineMessage -ErrorRecord $_)"
     }
-    Write-CheckLine -Name $catalogueTool.Name -Detail $check.Detail
+    $checkLineDetail = $check.Detail
+    if ($check.MoveFrom) { $checkLineDetail += "; in $($check.MoveFrom), to move to $($catalogueTool.Category)\$($catalogueTool.Name)" }
+    Write-CheckLine -Name $catalogueTool.Name -Detail $checkLineDetail
     $toolChecks.Add($check)
 }
 
@@ -2980,8 +3634,7 @@ foreach ($ancillaryRow in @($AncillaryContent | Where-Object { $name = $_.Tool; 
         if ($state.Ancillary.ContainsKey($ancillaryRow.Tool)) { $record = $state.Ancillary[$ancillaryRow.Tool] }
         # A record is current only while its content is there: the tool on
         # record and its content folder on disk.
-        $catalogueTool = @($Catalogue | Where-Object { $_.Name -eq $ancillaryRow.Tool }) | Select-Object -First 1
-        $contentPresent = $state.Tools.ContainsKey($ancillaryRow.Tool) -and [System.IO.Directory]::Exists((Join-Path (Get-ToolFolder -CatalogueTool $catalogueTool) $ancillaryRow.Folder))
+        $contentPresent = $state.Tools.ContainsKey($ancillaryRow.Tool) -and [System.IO.Directory]::Exists((Join-Path (Get-ToolInstalledFolder -Record $state.Tools[$ancillaryRow.Tool]) $ancillaryRow.Folder))
         if (-not $check.Remote.Available) { $check.Status = 'Unavailable'; $check.Detail = $check.Remote.Detail }
         elseif (-not $state.Tools.ContainsKey($ancillaryRow.Tool)) { $check.Status = 'NotInstalled'; $check.Detail = "not installed: $($ancillaryRow.Tool) isn't; commit $($check.Remote.Marker.Substring(0, 12)) available" }
         elseif (-not $contentPresent) { $check.Status = 'NotInstalled'; $check.Detail = "not installed: no $($ancillaryRow.Folder) folder; commit $($check.Remote.Marker.Substring(0, 12)) available" }
@@ -3028,6 +3681,11 @@ if (-not $selectionGiven) {
 }
 
 $plan = New-Object System.Collections.Generic.List[string]
+switch ($scriptCheck.CopyAction) {
+    'Install' { $plan.Add((Format-PlanLine -Action 'Install' -Text "this script ($WorkstationVersion) to $(Format-Unbreakable -Text $scriptCheck.ProtectedPath), with its shortcut")) }
+    'Replace' { $plan.Add((Format-PlanLine -Action 'Replace' -Text "the copy at $(Format-Unbreakable -Text $scriptCheck.ProtectedPath) with this file ($WorkstationVersion)")) }
+}
+if ($scriptCheck.ReleaseStatus -eq 'Changed') { $plan.Add((Format-PlanLine -Action 'Update' -Text "this script to $($scriptCheck.Remote.Version) ($($scriptCheck.Remote.FileName)), which then takes over the run")) }
 foreach ($check in @($prerequisiteChecks | Where-Object { @('NotInstalled', 'Changed') -contains $_.Status })) {
     # The Visual C++ Redistributable's offer has no version until it is
     # downloaded: its file is named instead, and with a version installed
@@ -3040,17 +3698,20 @@ foreach ($check in @($prerequisiteChecks | Where-Object { @('NotInstalled', 'Cha
     if (-not $offeredText) { $offeredText = "(the vendor's current file)" }
     $plan.Add((Format-PlanLine -Action 'Install' -Text "$($check.Prerequisite.DisplayName) $offeredText ($($check.Remote.FileName))"))
 }
+foreach ($check in @($toolChecks | Where-Object { $_.MoveFrom })) {
+    $plan.Add((Format-PlanLine -Action 'Move' -Text "$($check.MoveFrom) to $($check.Tool.Category)\$($check.Tool.Name) (as it is: nothing downloaded)"))
+}
 foreach ($check in @($toolChecks | Where-Object { @('NotInstalled', 'Changed', 'Damaged', 'CatalogueChanged') -contains $_.Status })) {
     $action = 'Install'
     if ($check.Status -eq 'Changed') { $action = 'Update' }
     if ($check.Status -eq 'Damaged') { $action = 'Repair' }
     if ($check.Status -eq 'CatalogueChanged') { $action = 'Reinstall' }
-    $plan.Add((Format-PlanLine -Action $action -Text "$($check.Tool.Family)\$($check.Tool.Name) ($($check.Remote.Build), $($check.Remote.FileName))"))
+    $plan.Add((Format-PlanLine -Action $action -Text "$($check.Tool.Category)\$($check.Tool.Name) ($($check.Remote.Build), $($check.Remote.FileName))"))
 }
 foreach ($check in @($ancillaryChecks | Where-Object { @('NotInstalled', 'Changed') -contains $_.Status -or $_.ToolWillChange })) {
     $plan.Add((Format-PlanLine -Action 'Sync' -Text "$($check.Row.Description) ($($check.Row.Tool) --sync)"))
 }
-foreach ($check in @($toolChecks | Where-Object { $_.Status -eq 'AwaitingDownload' })) { $plan.Add((Format-PlanLine -Action 'Download' -Text "by hand: $($check.Remote.FileName) from $($check.Remote.Url) into $(Format-Unbreakable -Text (Get-DownloadsFolder)); this run can't install $($check.Tool.Name)")) }
+foreach ($check in @($toolChecks | Where-Object { $_.Status -eq 'AwaitingDownload' })) { $plan.Add((Format-PlanLine -Action 'Download' -Text "by hand: $($check.Remote.FileName) from $($check.Remote.Url) into $(Format-Unbreakable -Text (Get-DownloadsFolder)); an update run opens that page in the default browser; this run can't install $($check.Tool.Name)")) }
 foreach ($name in $removableTools) { $plan.Add((Format-PlanLine -Action 'Remove' -Text "$name (no longer in the catalogue)")) }
 foreach ($item in $removablePrerequisiteVersions) {
     $reason = 'no tool needs it'
@@ -3064,15 +3725,35 @@ Write-SectionHeading -Title 'Plan'
 foreach ($line in $plan) { Write-ConsoleLine -Text $line -Indent 2 -ContinuationIndent ($PlanActionWidth + 2) }
 
 if ($dryRun) {
-    foreach ($check in $prerequisiteChecks) { Add-Result -Group 'Prerequisites' -Name $check.Prerequisite.DisplayName -Status (Get-CheckStatus -CheckStatus $check.Status) -Detail $check.Detail }
-    foreach ($check in $toolChecks) { Add-Result -Group $check.Tool.Family -Name $check.Tool.Name -Status (Get-CheckStatus -CheckStatus $check.Status) -Detail $check.Detail }
-    foreach ($check in $ancillaryChecks) { Add-Result -Group 'Ancillary content' -Name $check.Row.Description -Status (Get-CheckStatus -CheckStatus $check.Status) -Detail $check.Detail }
+    $scriptStatus = 'PASS'
+    $scriptDetail = $scriptCheck.Detail
+    if ($scriptCheck.ReleaseStatus -eq 'Unknown') { $scriptStatus = 'WARN'; $scriptDetail += ' (see Warnings)' }
+    if ($scriptCheck.ReleaseStatus -eq 'Changed') { $scriptStatus = 'WARN'; $scriptDetail = "$($scriptCheck.Remote.Version) available: would be installed" }
+    if (@('Install', 'Replace') -contains $scriptCheck.CopyAction) { $scriptStatus = 'WARN'; $scriptDetail += "; the copy under $(Format-Unbreakable -Text $installRoot) would be $($scriptCheck.CopyAction.ToLowerInvariant())d" }
+    Add-Result -Group 'Script' -Name 'this script' -Status $scriptStatus -Detail $scriptDetail
+    foreach ($check in $prerequisiteChecks) {
+        $name = $check.Prerequisite.DisplayName
+        $detail = Add-CheckProblemToList -CheckStatus $check.Status -Name $name -Detail $check.Detail
+        Add-Result -Group 'Prerequisites' -Name $name -Status (Get-CheckStatus -CheckStatus $check.Status) -Detail $detail
+    }
+    foreach ($check in $toolChecks) {
+        $status = Get-CheckStatus -CheckStatus $check.Status
+        $detail = $check.Detail
+        if ($check.MoveFrom) { $detail += "; would be moved to $($check.Tool.Category)\$($check.Tool.Name)"; if ($status -eq 'PASS') { $status = 'WARN' } }
+        $detail = Add-CheckProblemToList -CheckStatus $check.Status -Name $check.Tool.Name -Detail $detail
+        Add-Result -Group $check.Tool.Category -Name $check.Tool.Name -Status $status -Detail $detail
+    }
+    foreach ($check in $ancillaryChecks) {
+        $name = $check.Row.Description
+        $detail = Add-CheckProblemToList -CheckStatus $check.Status -Name $name -Detail $check.Detail
+        Add-Result -Group 'Ancillary content' -Name $name -Status (Get-CheckStatus -CheckStatus $check.Status) -Detail $detail
+    }
     foreach ($item in $removablePrerequisiteVersions) { Add-Result -Group 'Clean-up' -Name "$($item.DisplayName) $($item.Version)" -Status 'WARN' -Detail 'would be removed' }
     foreach ($name in $removableTools) { Add-Result -Group 'Clean-up' -Name $name -Status 'WARN' -Detail 'would be removed' }
     $coverage = 'dry run: is every selected tool current? Nothing was changed.'
     $overall = Write-ResultBlock -Coverage $coverage
     Write-ConsoleLine -Text "Log: $(Format-Unbreakable -Text $logPath)"
-    switch ($overall) { 'PASS' { exit 0 } 'WARN' { exit 1 } default { exit 2 } }
+    switch ($overall) { 'PASS' { Exit-Run -Code 0 } 'WARN' { Exit-Run -Code 1 } default { Exit-Run -Code 2 } }
 }
 
 # --- Update: prerequisites first (tools and --sync need them) ---
@@ -3084,15 +3765,76 @@ try {
     Stop-Run -Reason "the working folders can't be created: $(Get-OneLineMessage -ErrorRecord $_)"
 }
 
-# Leftovers of an interrupted run (a tool's .new or .old folder) are the
-# script's own: removed before anything else.
-foreach ($familyRow in $Families) {
-    $familyFolder = Join-Path $installRoot $familyRow.Name
-    if (-not [System.IO.Directory]::Exists($familyFolder)) { continue }
-    foreach ($leftover in @([System.IO.Directory]::GetDirectories($familyFolder) | Where-Object { $_ -match '\.(new|old)$' })) {
-        try { Remove-OwnedFolder -Path $leftover -Root $installRoot; Write-ConsoleLine -Text "Removed a leftover of an earlier run: $(Format-Unbreakable -Text $leftover)" -Indent 2 }
-        catch { Add-RunWarning -Message "A leftover of an earlier run could not be removed: $(Format-Unbreakable -Text $leftover) ($(Get-OneLineMessage -ErrorRecord $_))" }
+# Leftovers of an interrupted run, or of a removal whose copy couldn't be
+# deleted (a tool's .new or .old folder), are the script's own: removed
+# before anything else, and the folder they were in with them when that is
+# left empty. The folders under the install root are the categories' (and
+# the families' on a workstation built before 0.3.0).
+foreach ($parentFolder in @([System.IO.Directory]::GetDirectories($installRoot))) {
+    foreach ($leftover in @([System.IO.Directory]::GetDirectories($parentFolder) | Where-Object { $_ -match '\.(new|old)$' })) {
+        try {
+            Remove-OwnedFolder -Path $leftover -Root $installRoot
+            Write-ConsoleLine -Text "Removed a leftover of an earlier run: $(Format-Unbreakable -Text $leftover)" -Indent 2
+            Remove-EmptyToolParentFolder -ToolFolder $leftover -ToolName ([System.IO.Path]::GetFileName($leftover))
+        } catch {
+            Add-RunWarning -Message "A leftover of an earlier run could not be removed: $(Format-Unbreakable -Text $leftover) ($(Get-OneLineMessage -ErrorRecord $_))"
+        }
     }
+}
+
+# --- Update: the script itself first; a newer release takes over the run ---
+Write-SectionHeading -Title 'Script'
+if (@('Install', 'Replace') -contains $scriptCheck.CopyAction) {
+    try {
+        Install-ScriptCopy -SourcePath $PSCommandPath -ProtectedPath $scriptCheck.ProtectedPath -Version $WorkstationVersion -Sha256 $scriptSha256 -Remote $null -Download $null -State $state
+        Save-State -State $state -Path $statePath
+        Write-ConsoleLine -Text "This script ($WorkstationVersion) copied to $(Format-Unbreakable -Text $scriptCheck.ProtectedPath); its shortcut follows with the others." -Indent 2 -ContinuationIndent 4
+        Add-Result -Group 'Script' -Name 'installed copy' -Status 'PASS' -Detail "$WorkstationVersion copied to $(Format-Unbreakable -Text $scriptCheck.ProtectedPath)"
+    } catch {
+        Add-Result -Group 'Script' -Name 'installed copy' -Status 'FAIL' -Detail 'not copied (see Failures)'
+        Add-RunFailure -Message "this script: not copied to $(Format-Unbreakable -Text $scriptCheck.ProtectedPath): $(Get-OneLineMessage -ErrorRecord $_)"
+    }
+} elseif ($scriptCheck.RunningIsProtected -and -not $state.Script) {
+    # The protected copy was put there by hand (or by an older version):
+    # on record from now on, so its shortcut and files.csv row follow.
+    try {
+        Install-ScriptCopy -SourcePath $PSCommandPath -ProtectedPath $scriptCheck.ProtectedPath -Version $WorkstationVersion -Sha256 $scriptSha256 -Remote $null -Download $null -State $state
+        Save-State -State $state -Path $statePath
+        Write-ConsoleLine -Text "The installed copy ($WorkstationVersion) is on record from this run." -Indent 2
+    } catch {
+        Add-RunWarning -Message "this script: the installed copy could not be put on record: $(Get-OneLineMessage -ErrorRecord $_)"
+    }
+}
+if ($scriptCheck.ReleaseStatus -eq 'Changed') {
+    Write-ConsoleLine -Text "Installing this script's release $($scriptCheck.Remote.Version)" -Indent 2
+    $handedOver = $false
+    try {
+        $detail = Install-ScriptUpdate -Check $scriptCheck -State $state
+        Save-State -State $state -Path $statePath
+        Write-ConsoleLine -Text $detail -Indent 4
+        Add-Result -Group 'Script' -Name 'this script' -Status 'PASS' -Detail $detail
+        $handedOver = $true
+    } catch {
+        Add-Result -Group 'Script' -Name 'this script' -Status 'FAIL' -Detail 'not updated (see Failures)'
+        Add-RunFailure -Message "this script: $(Get-OneLineMessage -ErrorRecord $_)"
+        Write-ConsoleLine -Text "NOT DONE: $(Get-OneLineMessage -ErrorRecord $_); this run continues with $WorkstationVersion." -Indent 4
+    }
+    if ($handedOver) {
+        Write-ConsoleLine -Text ''
+        Write-ConsoleLine -Text "This run ($WorkstationVersion) ends here and hands over to $($scriptCheck.Remote.Version), which runs now in this window with the same selection and its own log." -ContinuationIndent 2
+        $handoverExitCode = 2
+        try { $handoverExitCode = Invoke-ScriptRelaunch -ScriptPath $scriptCheck.ProtectedPath } catch { Write-ConsoleLine -Text "The new version could not be started: $(Get-OneLineMessage -ErrorRecord $_)" }
+        $pauseAtExit = $false     # the new version paused when asked to
+        Exit-Run -Code $handoverExitCode
+    }
+} else {
+    $scriptLineStatus = $scriptCheck.ReleaseStatus
+    if (@('Off', 'NotReleased') -contains $scriptLineStatus) { $scriptLineStatus = 'Current' }     # settled: nothing to do, nothing wrong
+    if (-not $scriptCheck.CopyAction) { Write-NothingToDoLine -Statuses @($scriptLineStatus) -NoActionStatuses @('Current', 'Unknown') }
+    $scriptStatus = 'PASS'
+    $scriptDetail = $scriptCheck.Detail
+    if ($scriptCheck.ReleaseStatus -eq 'Unknown') { $scriptStatus = 'WARN'; $scriptDetail += ' (see Warnings)' }
+    Add-Result -Group 'Script' -Name 'this script' -Status $scriptStatus -Detail $scriptDetail
 }
 
 Write-SectionHeading -Title 'Prerequisites'
@@ -3131,10 +3873,33 @@ if ($prerequisiteChecks.Count -eq 0 -and $neededPrerequisites.Count -eq 0) {
 
 # --- Update: tools ---
 Write-SectionHeading -Title 'Tools'
-Write-NothingToDoLine -Statuses @($toolChecks | ForEach-Object { $_.Status }) -NoActionStatuses @('Current', 'Unknown', 'Unavailable', 'AwaitingDownload')
+$openedPages = @()
+if (@($toolChecks | Where-Object { $_.MoveFrom }).Count -eq 0) {
+    Write-NothingToDoLine -Statuses @($toolChecks | ForEach-Object { $_.Status }) -NoActionStatuses @('Current', 'Unknown', 'Unavailable', 'AwaitingDownload')
+}
 foreach ($check in $toolChecks) {
     $catalogueTool = $check.Tool
-    $group = $catalogueTool.Family
+    $group = $catalogueTool.Category
+    # First to its category's folder, whatever its source says; a tool that
+    # can't be moved (in use) isn't updated either: it stays as it is.
+    if ($check.MoveFrom) {
+        Write-ConsoleLine -Text "$($catalogueTool.Category)\$($catalogueTool.Name): moving from $($check.MoveFrom)" -Indent 2
+        try {
+            $moveDetail = Move-ToolFolder -CatalogueTool $catalogueTool -State $state
+            Save-State -State $state -Path $statePath
+            Write-ConsoleLine -Text $moveDetail -Indent 4 -ContinuationIndent 6
+            if ($check.Status -eq 'Current') { $check.Detail += "; moved from $($check.MoveFrom)" }
+        } catch {
+            $message = Get-OneLineMessage -ErrorRecord $_
+            $status = 'FAIL'
+            if ($_.Exception -is [System.InvalidOperationException] -and $message -like 'in use*') { $status = 'WARN'; Add-RunWarning -Message "$($catalogueTool.Name): $message" } else { Add-RunFailure -Message "$($catalogueTool.Name): $message" }
+            $pointer = '(see Failures)'
+            if ($status -eq 'WARN') { $pointer = '(see Warnings)' }
+            Add-Result -Group $group -Name $catalogueTool.Name -Status $status -Detail "not moved to $($catalogueTool.Category)\$($catalogueTool.Name), left as it is $pointer"
+            Write-ConsoleLine -Text "NOT DONE: $message" -Indent 4
+            continue
+        }
+    }
     switch ($check.Status) {
         'Current'     { Add-Result -Group $group -Name $catalogueTool.Name -Status 'PASS' -Detail $check.Detail }
         'Unknown'     {
@@ -3144,9 +3909,23 @@ foreach ($check in $toolChecks) {
             Add-RunWarning -Message "$($catalogueTool.Name): $detail"
         }
         'Unavailable' { Add-Result -Group $group -Name $catalogueTool.Name -Status 'FAIL' -Detail "$($check.Detail) (see Failures)"; Add-RunFailure -Message "$($catalogueTool.Name): $($check.Detail)" }
-        'AwaitingDownload' { Add-Result -Group $group -Name $catalogueTool.Name -Status 'WARN' -Detail "to download by hand (see Warnings)"; Add-RunWarning -Message "$($catalogueTool.Name): $($check.Detail)" }
+        'AwaitingDownload' {
+            Add-Result -Group $group -Name $catalogueTool.Name -Status 'WARN' -Detail "to download by hand (see Warnings)"
+            Add-RunWarning -Message "$($catalogueTool.Name): $($check.Detail)"
+            # The vendor's page opens in the default browser once per page, at
+            # the desktop's rights, so the download can start now.
+            if ([Environment]::UserInteractive -and $openedPages -notcontains $check.Remote.Url) {
+                try {
+                    Open-PageInDefaultBrowser -Url $check.Remote.Url
+                    $openedPages += $check.Remote.Url
+                    Write-ConsoleLine -Text "$($catalogueTool.Category)\$($catalogueTool.Name): opened $($check.Remote.Url) in the default browser (through Explorer, not elevated)" -Indent 2 -ContinuationIndent 4
+                } catch {
+                    Add-RunWarning -Message "$($catalogueTool.Name): the downloads page could not be opened in the browser: $(Get-OneLineMessage -ErrorRecord $_)"
+                }
+            }
+        }
         default {
-            Write-ConsoleLine -Text "$($catalogueTool.Family)\$($catalogueTool.Name): $($check.Detail)" -Indent 2
+            Write-ConsoleLine -Text "$($catalogueTool.Category)\$($catalogueTool.Name): $($check.Detail)" -Indent 2
             try {
                 $reinstall = @('Damaged', 'CatalogueChanged') -contains $check.Status
                 $newRecord = Install-Tool -CatalogueTool $catalogueTool -Remote $check.Remote -State $state -Reinstall:$reinstall
@@ -3322,4 +4101,4 @@ $coverage = 'every tool in the catalogue, its prerequisites and ancillary conten
 if ($selectionGiven) { $coverage = "the selected tools only ($selectionText)" }
 $overall = Write-ResultBlock -Coverage $coverage
 Write-ConsoleLine -Text "Log: $(Format-Unbreakable -Text $logPath)"
-switch ($overall) { 'PASS' { exit 0 } 'WARN' { exit 1 } default { exit 2 } }
+switch ($overall) { 'PASS' { Exit-Run -Code 0 } 'WARN' { Exit-Run -Code 1 } default { Exit-Run -Code 2 } }
