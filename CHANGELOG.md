@@ -4,6 +4,39 @@ Notable changes to `Update-ForensicWorkstation.ps1`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.6.0 - 2026-10-28
+
+### Added
+- The scheduled update, off unless set up: `-ScheduledUpdate Enable` registers
+  a task that runs the installed copy once a day at 08:00 local time (a
+  missed run as soon as the machine is next on, once), elevated without a
+  UAC prompt, while the account is logged on, with no window (through
+  `conhost.exe --headless`); `-ScheduledUpdate Disable` removes it, and
+  its empty folder in Task Scheduler. Neither does anything else.
+- `-Scheduled`, the task's run: a full update, unattended (no pause, no
+  window). It tells the analyst only of a run that failed or stopped (a
+  click opens the log) and of each page awaiting a hand download (a click
+  opens the page), as Windows notifications; it opens no page itself, and
+  another run holding the update lock stops it without a notification.
+- The result block ends with an INFO line (cyan) on the scheduled update:
+  disabled, not run yet (its first run), running, or its last run and exit
+  code, with the next run, in UTC. It doesn't change the verdict, except a
+  scheduled update set up whose task is gone from Task Scheduler (WARN).
+  The exit code is the one the scheduled run records in
+  `scheduled-run.json` (Task Scheduler sees the console host's).
+
+### Changed
+- A signer refusal says what is wrong: "has a signature by X that is not
+  valid (HashMismatch)" for a changed signed file, "is not signed" for an
+  unsigned one (both read "is signed by X (...), expected Y" before).
+
+### Fixed
+- Arsenal Image Mounter's hand download pointed at the product's page,
+  which has the version and MD5 but no download link: the check line,
+  the plan, the page opened and `SourceUrl` now give
+  `https://arsenalrecon.com/downloads`. The version and MD5 are still read
+  from the product's page.
+
 ## 0.5.0 - 2026-10-28
 
 ### Changed

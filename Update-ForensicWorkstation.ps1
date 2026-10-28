@@ -55,6 +55,19 @@
 .PARAMETER Tool
     Limits the run to these tools (and the prerequisites they need).
 
+.PARAMETER ScheduledUpdate
+    Enable sets up the scheduled update: a daily task (08:00 local time, or
+    as soon as the machine is next on) that runs the installed copy of this
+    script elevated, with no UAC prompt, while the analyst is logged on; it
+    reports only errors and hand downloads, as Windows notifications.
+    Disable removes it. Changes nothing else; needs elevation. Off unless
+    enabled.
+
+.PARAMETER Scheduled
+    The scheduled update's own run, as its task starts it: a full update,
+    unattended (no pause, a hidden window), whose only output beyond its log
+    is a notification for an error or a hand download.
+
 .EXAMPLE
     .\Update-ForensicWorkstation.ps1
 
@@ -75,6 +88,11 @@
     .\Update-ForensicWorkstation.ps1 -Category Execution
 
     Updates the tools of the Execution category only.
+
+.EXAMPLE
+    .\Update-ForensicWorkstation.ps1 -ScheduledUpdate Enable
+
+    Sets up the daily scheduled update (-ScheduledUpdate Disable removes it).
 
 .NOTES
     Version: $WorkstationVersion below (semver); changes are in CHANGELOG.md.
@@ -101,12 +119,15 @@ param(
     [string[]]$Tool = @(),
     [switch]$Pause,
     [switch]$NoSelfUpdate,
-    [switch]$ElevatedRelaunch
+    [switch]$ElevatedRelaunch,
+    [ValidateSet('Enable', 'Disable')]
+    [string]$ScheduledUpdate = '',
+    [switch]$Scheduled
 )
 
 # ============================== CONFIG ==============================
 
-$WorkstationVersion = '0.5.0'
+$WorkstationVersion = '0.6.0'
 
 # No script-wide error suppression: every unit of work has its own try/catch.
 # Progress bars are off: Invoke-WebRequest in PowerShell 5.1 is many times
@@ -386,6 +407,7 @@ $Sources = @(
     # through MEGA).
     [pscustomobject]@{ Name = 'ArsenalRecon'; Kind = 'VersionPage'
         PageUrl = 'https://arsenalrecon.com/products/arsenal-image-mounter/downloads'
+        DownloadPageUrl = 'https://arsenalrecon.com/downloads'
         VersionPattern = 'Arsenal-Image-Mounter[-_]v(?<version>\d+(?:\.\d+){1,3})\.zip\s*MD5\s*Hash\s*=\s*(?<hash>[0-9a-fA-F]{32})?'; HashAlgorithm = 'MD5'
         FileName = '{0}-v{1}.zip'; ManualDownload = $true; Downloads = @() }
     # Microsoft's permanent download links redirect to a URL holding the
@@ -534,6 +556,42 @@ $ProtectedScriptName = 'Update-ForensicWorkstation.ps1'
 $ScriptShortcutName = 'Update forensic workstation'
 $ScriptShortcutArguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -Pause'     # {0}: the protected copy's path
 
+# --- The scheduled update ---
+# Opt in (-ScheduledUpdate Enable): a Task Scheduler task under the
+# analyst's account runs the protected copy with -Scheduled once a day,
+# elevated with no prompt ("Run with highest privileges"), in the
+# analyst's desktop session ("Run only when user is logged on"). A run
+# missed (the machine off at the time) starts as soon as it can, once
+# however many days were missed; it needs the network, and may start and
+# go on on battery. The time is the machine's local time.
+$ScheduledTaskFolder = '\ForensicWorkstation\'
+$ScheduledTaskName = 'Update forensic workstation'
+$ScheduledTaskDescription = 'Updates the forensic tools once a day (Update-ForensicWorkstation.ps1 -Scheduled). Set up and removed with -ScheduledUpdate Enable / Disable.'
+$ScheduledUpdateTime = '08:00'
+$ScheduledUpdateTimeLimit = New-TimeSpan -Hours 2     # a fresh build takes about 15 minutes
+$ScheduledUpdateArguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Scheduled'     # {0}: the protected copy's path
+# The task starts PowerShell through Windows' console host with no window
+# (conhost.exe --headless): PowerShell's -WindowStyle Hidden only hides its
+# console once it runs, so a console started directly showed for about
+# 47 ms at each start (round 2.20).
+$ScheduledUpdateConsoleHostArguments = '--headless "{0}" {1}'     # {0}: powershell.exe, {1}: its arguments
+# Through the console host, Task Scheduler's last result is conhost's exit
+# code (always 0), not this script's (round 2.21): a scheduled run writes
+# its own outcome to this file in the records folder, for the INFO line.
+$ScheduledRunRecordName = 'scheduled-run.json'
+# A scheduled run tells the analyst only of an error or a hand download, as
+# a Windows notification under this name (an AppUserModelID registered for
+# the account); where Windows refuses it, under Windows PowerShell's own.
+$NotificationAppId = 'ForensicWorkstation.Update'
+$NotificationAppName = 'Update forensic workstation'
+$NotificationFallbackAppId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+$NotificationAppIdKeyRoot = 'HKCU:\Software\Classes\AppUserModelId'
+$NotificationBodyMaxLength = 250
+# Task Scheduler's own codes for a task's last result: not run yet
+# (SCHED_S_TASK_HAS_NOT_RUN) and running now (SCHED_S_TASK_RUNNING).
+$TaskResultNotRunYet = 0x41303
+$TaskResultRunning = 0x41301
+
 # --- Shortcuts ---
 # A shortcut's "Run as administrator": the RunAsUser bit of the LinkFlags
 # field in the .lnk header (MS-SHLLINK 2.1.1), which WScript.Shell can't
@@ -667,11 +725,17 @@ function Write-LabelValue {
 
 # Stop before any work, with the reason and, where given, a list (one item
 # per line) (exit code 3).
+# A scheduled run, unattended, also says it in a notification, except where
+# the stop is expected (-WithoutNotification: another update run holds the
+# lock).
 function Stop-Run {
-    param([string]$Reason, [string[]]$List = @())
+    param([string]$Reason, [string[]]$List = @(), [switch]$WithoutNotification)
     Write-ConsoleLine -Text ''
     Write-ConsoleLine -Text "Stopped before any work: $Reason" -ContinuationIndent 2
     foreach ($item in $List) { Write-ConsoleLine -Text "- $item" -Indent 2 -ContinuationIndent 4 }
+    if ($script:Scheduled -and -not $WithoutNotification) {
+        Send-RunNotification -Title 'Forensic workstation update stopped' -Body "Stopped before any work: $Reason" -LaunchUri (Get-RunLogUri)
+    }
     Exit-Run -Code 3
 }
 
@@ -679,8 +743,10 @@ function Stop-Run {
 # waiting for a key doesn't hold up the next run), and when the window would
 # close with the run (-Pause, or started from Explorer: a shortcut, "Run
 # with PowerShell"), it waits for a key first, so the result can be read.
+# A scheduled run first records how it ended (Save-ScheduledRunRecord).
 function Exit-Run {
     param([int]$Code)
+    if ($script:recordScheduledRunAtExit) { Save-ScheduledRunRecord -ExitCode $Code }
     Exit-UpdateLock
     if ($script:pauseAtExit -and -not [Console]::IsInputRedirected) {
         Write-Host ''
@@ -771,6 +837,7 @@ function Get-StatusColour {
         'PASS' { return 'Green' }
         'WARN' { return 'Yellow' }
         'FAIL' { return 'Red' }
+        'INFO' { return 'Cyan' }
     }
     return ''
 }
@@ -1011,16 +1078,30 @@ function Get-SignerInfo {
 }
 
 # Whether a signature is acceptable: valid and by the expected signer, or
-# (where allowed) not signed at all. Returns Accepted and a description for
-# the records ("ZimTech LLC (valid)", "unsigned", ...).
+# (where allowed) not signed at all. Returns Accepted, a description for
+# the records ("ZimTech LLC (Valid)", "unsigned", ...) and Refusal: why it
+# isn't accepted, to follow the file's name in a message ("is signed by
+# X, expected Y"; "has a signature by X that is not valid (HashMismatch)").
+# ExpectedDescription words the expected signer there, where it isn't the
+# name itself.
 function Test-SignerAccepted {
-    param($SignerInfo, [string]$ExpectedSigner, [bool]$UnsignedAllowed)
+    param($SignerInfo, [string]$ExpectedSigner, [bool]$UnsignedAllowed, [string]$ExpectedDescription = '')
+    if (-not $ExpectedDescription) { $ExpectedDescription = $ExpectedSigner }
     if ($SignerInfo.Status -eq 'NotSigned') {
-        return [pscustomobject]@{ Accepted = $UnsignedAllowed; Description = 'unsigned' }
+        $refusal = ''
+        if (-not $UnsignedAllowed) { $refusal = "is not signed, expected $ExpectedDescription" }
+        return [pscustomobject]@{ Accepted = $UnsignedAllowed; Description = 'unsigned'; Refusal = $refusal }
     }
     $description = "$($SignerInfo.Subject) ($($SignerInfo.Status))"
-    $accepted = ($SignerInfo.Status -eq 'Valid' -and $SignerInfo.Subject -eq $ExpectedSigner)
-    return [pscustomobject]@{ Accepted = $accepted; Description = $description }
+    $refusal = ''
+    if ($SignerInfo.Status -ne 'Valid') {
+        $signerText = ''
+        if ($SignerInfo.Subject) { $signerText = " by $($SignerInfo.Subject)" }
+        $refusal = "has a signature$signerText that is not valid ($($SignerInfo.Status))"
+    } elseif ($SignerInfo.Subject -ne $ExpectedSigner) {
+        $refusal = "is signed by $($SignerInfo.Subject), expected $ExpectedDescription"
+    }
+    return [pscustomobject]@{ Accepted = (-not $refusal); Description = $description; Refusal = $refusal }
 }
 
 # Windows' own verifier for a file against a signed catalogue, the check
@@ -1579,16 +1660,20 @@ function Get-VersionPageRemote {
         $fileName = $Source.FileName -f $Row.Package, $version, ''
         $downloadsFolder = Get-DownloadsFolder
         $localFile = Join-Path $downloadsFolder $fileName
+        # The page the analyst downloads from, where it isn't the page read
+        # for the version (Arsenal's link is on its general downloads page).
+        $downloadPageUrl = $pageUrl
+        if ($Source.DownloadPageUrl) { $downloadPageUrl = $Source.DownloadPageUrl -f $Row.Package }
         if (-not [System.IO.File]::Exists($localFile)) {
-            return (New-Remote -Available $true -Version $version -Marker $version -Url $pageUrl -FileName $fileName -VendorHashAlgorithm $vendorHashAlgorithm -VendorHash $vendorHash `
-                    -Detail "download $fileName from $pageUrl into $(Format-Unbreakable -Text $downloadsFolder), then run again" -NeedsManualDownload $true)
+            return (New-Remote -Available $true -Version $version -Marker $version -Url $downloadPageUrl -FileName $fileName -VendorHashAlgorithm $vendorHashAlgorithm -VendorHash $vendorHash `
+                    -Detail "download $fileName from $downloadPageUrl into $(Format-Unbreakable -Text $downloadsFolder), then run again" -NeedsManualDownload $true)
         }
         $localBuild = $Build
         if ($Row.RuntimeConfig) {
             $localBuild = Get-ZipDotNetBuild -ZipPath $localFile -RuntimeConfigName $Row.RuntimeConfig
             if (-not $localBuild) { throw "$fileName names no .NET line in its $($Row.RuntimeConfig)" }
         }
-        return (New-Remote -Available $true -Version $version -Build $localBuild -Marker $version -Url $pageUrl -FileName $fileName -VendorHashAlgorithm $vendorHashAlgorithm -VendorHash $vendorHash -LocalFile $localFile)
+        return (New-Remote -Available $true -Version $version -Build $localBuild -Marker $version -Url $downloadPageUrl -FileName $fileName -VendorHashAlgorithm $vendorHashAlgorithm -VendorHash $vendorHash -LocalFile $localFile)
     }
     foreach ($download in $Source.Downloads) {
         $url = $download.Url -f $Row.Package, $version, $download.Suffix
@@ -2206,7 +2291,7 @@ function Save-VerifiedDownload {
         $check = Test-SignerAccepted -SignerInfo (Get-SignerInfo -Path $path) -ExpectedSigner $ExpectedSigner -UnsignedAllowed $UnsignedAllowed
         if (-not $check.Accepted) {
             Remove-OwnedFile -Path $path -Root $StagingFolder
-            throw "$($Remote.FileName): signed by $($check.Description), expected $ExpectedSigner"
+            throw "$($Remote.FileName) $($check.Refusal)"
         }
         $signer = $check.Description
     }
@@ -2321,7 +2406,7 @@ function Install-DriverPackagePrerequisite {
         foreach ($expected in @(@{ Path = $installer; Signer = $row.ExpectedSigner }, @{ Path = $catalogue; Signer = $row.DriverSigner })) {
             if (-not [System.IO.File]::Exists($expected.Path)) { throw "the package has no $(Get-RelativePath -Path $expected.Path -Root $packageFolder)" }
             $check = Test-SignerAccepted -SignerInfo (Get-SignerInfo -Path $expected.Path) -ExpectedSigner $expected.Signer -UnsignedAllowed $false
-            if (-not $check.Accepted) { throw "$(Get-RelativePath -Path $expected.Path -Root $packageFolder) is signed by $($check.Description), expected $($expected.Signer)" }
+            if (-not $check.Accepted) { throw "$(Get-RelativePath -Path $expected.Path -Root $packageFolder) $($check.Refusal)" }
             $signerDescriptions[$expected.Path] = $check.Description
         }
         $driverFolder = Join-Path $packageFolder $row.PackageDriverFolder
@@ -2426,7 +2511,9 @@ function Uninstall-PrerequisiteVersion {
 # self-update). -Pause keeps the new window open; -NoSelfUpdate stops the
 # new version checking again; -ElevatedRelaunch marks the elevated
 # relaunch, so a relaunched run that still isn't elevated stops instead of
-# relaunching once more.
+# relaunching once more. -ScheduledUpdate and -Scheduled go with them: the
+# elevated relaunch sets up the task; a scheduled run's new version is
+# scheduled too.
 function Get-RelaunchArgumentList {
     param([string]$ScriptPath, [bool]$PauseAtExit, [bool]$NoSelfUpdate, [bool]$ElevatedRelaunch = $false)
     $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
@@ -2438,6 +2525,8 @@ function Get-RelaunchArgumentList {
     if ($PauseAtExit) { $arguments += ' -Pause' }
     if ($NoSelfUpdate) { $arguments += ' -NoSelfUpdate' }
     if ($ElevatedRelaunch) { $arguments += ' -ElevatedRelaunch' }
+    if ($script:ScheduledUpdate) { $arguments += " -ScheduledUpdate $($script:ScheduledUpdate)" }
+    if ($script:Scheduled) { $arguments += ' -Scheduled' }
     return $arguments
 }
 
@@ -2602,6 +2691,341 @@ function Install-ScriptUpdate {
         try { Remove-OwnedFile -Path $download.Path -Root $script:stagingFolder } catch {}
     }
     return "$($Check.Remote.Version) installed at $(Format-Unbreakable -Text $Check.ProtectedPath)"
+}
+
+# --- The scheduled update and its notifications ---
+# The task (CONFIG, "The scheduled update") and the name its notifications
+# carry are set up by -ScheduledUpdate Enable and removed by Disable,
+# recorded in state.json (ScheduledUpdate). Nothing else sets them up.
+
+# The scheduled update's task, or $null where there is none. Any other
+# failure to read it throws (unknown is not "none").
+function Get-ScheduledUpdateTask {
+    try {
+        return (Get-ScheduledTask -TaskPath $script:ScheduledTaskFolder -TaskName $script:ScheduledTaskName -ErrorAction Stop)
+    } catch {
+        if ($_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound) { return $null }
+        throw
+    }
+}
+
+# The scheduled update's action: the program the task starts and its
+# arguments, the protected copy with -Scheduled in a console with no window.
+function Get-ScheduledUpdateAction {
+    param([string]$ScriptPath)
+    $powerShellArguments = $script:ScheduledUpdateArguments -f $ScriptPath
+    return [pscustomobject]@{
+        Execute   = (Join-Path ([Environment]::SystemDirectory) 'conhost.exe')
+        Arguments = ($script:ScheduledUpdateConsoleHostArguments -f (Get-PowerShellPath), $powerShellArguments)
+    }
+}
+
+# Register (or replace) the scheduled update's task for an account: the
+# protected copy with -Scheduled, daily at $ScheduledUpdateTime, elevated,
+# in the account's own session.
+function Register-ScheduledUpdateTask {
+    param([string]$ScriptPath, [string]$Account)
+    $startTime = [DateTime]::ParseExact($script:ScheduledUpdateTime, 'HH:mm', [Globalization.CultureInfo]::InvariantCulture)
+    $expectedAction = Get-ScheduledUpdateAction -ScriptPath $ScriptPath
+    $action = New-ScheduledTaskAction -Execute $expectedAction.Execute -Argument $expectedAction.Arguments
+    $trigger = New-ScheduledTaskTrigger -Daily -At $startTime
+    $principal = New-ScheduledTaskPrincipal -UserId $Account -LogonType Interactive -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit $script:ScheduledUpdateTimeLimit
+    $task = New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description $script:ScheduledTaskDescription
+    $null = Register-ScheduledTask -TaskPath $script:ScheduledTaskFolder -TaskName $script:ScheduledTaskName -InputObject $task -Force -ErrorAction Stop
+}
+
+# What, in the task as Task Scheduler now has it, differs from what
+# Register-ScheduledUpdateTask asked for (none: it is as set up).
+function Get-ScheduledUpdateTaskProblem {
+    param($Task, [string]$ScriptPath)
+    if (-not $Task) { return @('Task Scheduler has no such task') }
+    $actions = @($Task.Actions)
+    $expectedAction = Get-ScheduledUpdateAction -ScriptPath $ScriptPath
+    $problems = @()
+    if ([string]$Task.Principal.RunLevel -ne 'Highest') { $problems += "it runs with $($Task.Principal.RunLevel) privileges, not the highest" }
+    if ([string]$Task.Principal.LogonType -ne 'Interactive') { $problems += "its logon type is $($Task.Principal.LogonType), not only when the user is logged on" }
+    if ($actions.Count -ne 1 -or $actions[0].Execute -ne $expectedAction.Execute -or $actions[0].Arguments -ne $expectedAction.Arguments) { $problems += 'its action is not the protected copy with -Scheduled, through the console host with no window' }
+    if (-not $Task.Settings.StartWhenAvailable) { $problems += "a missed run wouldn't start later" }
+    return $problems
+}
+
+# When Task Scheduler will next start the task, in UTC, or 'unknown'.
+function Get-ScheduledUpdateNextRunText {
+    param($Task)
+    try {
+        $nextRunTime = (Get-ScheduledTaskInfo -InputObject $Task -ErrorAction Stop).NextRunTime
+        if ($nextRunTime) { return (Format-UtcTime -Time $nextRunTime) }
+    } catch {}
+    return 'unknown'
+}
+
+# The task's state in a few words, for the result block: switched off in
+# Task Scheduler, running now, not run yet (its first run), or its last run
+# and result, with the next run. Times in UTC. The last run's exit code is
+# the one its own record gives (Get-ScheduledRunRecord): Task Scheduler's
+# result is the console host's 0. A result other than 0 is Task
+# Scheduler's own (the run could not start, for example), shown in hex.
+function Get-ScheduledTaskStatusText {
+    param($Task)
+    if ([string]$Task.State -eq 'Disabled') { return 'set up, but switched off in Task Scheduler: the daily update does not run' }
+    $taskInfo = Get-ScheduledTaskInfo -InputObject $Task -ErrorAction Stop
+    $nextRunText = 'unknown'
+    if ($taskInfo.NextRunTime) { $nextRunText = Format-UtcTime -Time $taskInfo.NextRunTime }
+    $lastResult = [uint32]$taskInfo.LastTaskResult
+    if ($lastResult -eq $script:TaskResultNotRunYet) { return "enabled, not run yet; first run $nextRunText" }
+    if ($lastResult -eq $script:TaskResultRunning) { return "running now (started $(Format-UtcTime -Time $taskInfo.LastRunTime)); next run $nextRunText" }
+    $lastRunText = Format-UtcTime -Time $taskInfo.LastRunTime
+    if ($lastResult -ne 0) { return ("last run $lastRunText (Task Scheduler's result 0x{0:X8}); next run $nextRunText" -f $lastResult) }
+    $resultText = 'exit code unknown: that run left no record of its own'
+    try {
+        $record = Get-ScheduledRunRecord -LastRunTime $taskInfo.LastRunTime
+        if ($record) { $resultText = "exit code $($record.ExitCode)" }
+    } catch {
+        $resultText = "exit code unknown: its record can't be read ($(Get-OneLineMessage -ErrorRecord $_))"
+    }
+    return "last run $lastRunText ($resultText); next run $nextRunText"
+}
+
+# Write this scheduled run's outcome ($ScheduledRunRecordName in the records
+# folder): its start, its end, its exit code and its log. Never stops the
+# exit: a run that can't write it (not elevated, no records folder yet)
+# leaves the previous run's record, which the INFO line won't take for its
+# own (Get-ScheduledRunRecord).
+function Save-ScheduledRunRecord {
+    param([int]$ExitCode)
+    try {
+        if (-not $script:recordsRoot -or -not [System.IO.Directory]::Exists($script:recordsRoot)) { return }
+        $record = [ordered]@{
+            StartedUtc = (Format-UtcTime -Time $script:runStartUtc); EndedUtc = (Format-UtcTime -Time (Get-Date)); ExitCode = $ExitCode; Log = $script:logPath
+        }
+        $json = ConvertTo-Json -InputObject $record
+        Write-TextFileReplacing -Path (Join-Path $script:recordsRoot $script:ScheduledRunRecordName) -Text (($json -replace "`r?`n", "`r`n") + "`r`n")
+    } catch {
+        try { Add-LogLine -Text "The scheduled run's record ($($script:ScheduledRunRecordName)) could not be written: $(Get-OneLineMessage -ErrorRecord $_)" } catch {}
+    }
+}
+
+# The record of the run the task started last, or $null: the record's run
+# must have started at the task's last start or after it, within the task's
+# time limit (an older record is the run before; one the last run couldn't
+# write is missing). Times compared to the second, as they are recorded.
+function Get-ScheduledRunRecord {
+    param([DateTime]$LastRunTime)
+    $path = Join-Path $script:recordsRoot $script:ScheduledRunRecordName
+    if (-not [System.IO.File]::Exists($path)) { return $null }
+    $record = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($path)) -ErrorAction Stop
+    $recordStartUtc = [DateTime]::ParseExact([string]$record.StartedUtc, "yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture, ([Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal))
+    $taskStartUtc = $LastRunTime.ToUniversalTime()
+    $taskStartUtc = $taskStartUtc.AddTicks(-($taskStartUtc.Ticks % [TimeSpan]::TicksPerSecond))
+    if ($recordStartUtc -lt $taskStartUtc -or $recordStartUtc -gt $taskStartUtc.Add($script:ScheduledUpdateTimeLimit)) { return $null }
+    return $record
+}
+
+# The scheduled update's state as an INFO line of the result block:
+# information, not a check, so it never changes the verdict. One exception:
+# set up (state.json) while Task Scheduler no longer has its task, the daily
+# updates have stopped unseen: a WARN.
+function Add-ScheduledTaskStatusResult {
+    param($State)
+    $group = 'Scheduled task'
+    $task = $null
+    try {
+        $task = Get-ScheduledUpdateTask
+    } catch {
+        Add-Result -Group $group -Name $group -Status 'INFO' -Detail "unknown: it can't be read ($(Get-OneLineMessage -ErrorRecord $_))"
+        return
+    }
+    if (-not $task) {
+        if ($State -and $State.ContainsKey('ScheduledUpdate')) {
+            Add-Result -Group $group -Name $group -Status 'WARN' -Detail 'set up, but Task Scheduler has no such task (see Warnings)'
+            Add-RunWarning -Message "Scheduled task: set up on $($State.ScheduledUpdate.SetUpUtc) (state.json), but Task Scheduler has no $($script:ScheduledTaskFolder)$($script:ScheduledTaskName): the daily update doesn't run. -ScheduledUpdate Enable sets it up again; -ScheduledUpdate Disable clears the record."
+        } else {
+            Add-Result -Group $group -Name $group -Status 'INFO' -Detail 'disabled (-ScheduledUpdate Enable sets it up)'
+        }
+        return
+    }
+    try {
+        Add-Result -Group $group -Name $group -Status 'INFO' -Detail (Get-ScheduledTaskStatusText -Task $task)
+    } catch {
+        Add-Result -Group $group -Name $group -Status 'INFO' -Detail "set up; its last and next run can't be read ($(Get-OneLineMessage -ErrorRecord $_))"
+    }
+}
+
+# Remove the task's folder in Task Scheduler when nothing else is in it
+# (Unregister-ScheduledTask leaves it). Returns whether it was removed: not
+# when it isn't there or isn't empty.
+function Remove-EmptyScheduledTaskFolder {
+    $service = New-Object -ComObject Schedule.Service
+    $service.Connect()
+    $folderPath = $script:ScheduledTaskFolder.TrimEnd('\')
+    $folderExists = @($service.GetFolder('\').GetFolders(0) | Where-Object { $_.Path -eq $folderPath }).Count -gt 0
+    if (-not $folderExists) { return $false }
+    $folder = $service.GetFolder($folderPath)
+    if ($folder.GetTasks(1).Count -gt 0 -or $folder.GetFolders(0).Count -gt 0) { return $false }      # 1: hidden tasks too
+    $service.GetFolder('\').DeleteFolder($folderPath.TrimStart('\'), 0)
+    return $true
+}
+
+# The name the notifications carry ($NotificationAppName), registered for
+# the account that runs the script; removed with the task.
+function Register-NotificationAppId {
+    $key = Join-Path $script:NotificationAppIdKeyRoot $script:NotificationAppId
+    if (-not (Test-Path -LiteralPath $key)) { $null = New-Item -Path $key -Force -ErrorAction Stop }
+    $null = New-ItemProperty -LiteralPath $key -Name 'DisplayName' -Value $script:NotificationAppName -PropertyType String -Force -ErrorAction Stop
+}
+
+function Unregister-NotificationAppId {
+    $key = Join-Path $script:NotificationAppIdKeyRoot $script:NotificationAppId
+    if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction Stop }
+}
+
+# -ScheduledUpdate Enable: the task, for the account that runs this (the
+# analyst's: the account guard has passed), and the notifications' name.
+# The task runs the protected copy, which must be this file: an older copy
+# doesn't know -Scheduled, and its task would fail every day unseen.
+function Enable-ScheduledUpdate {
+    param($State)
+    $group = 'Scheduled update'
+    $protectedPath = Join-Path $script:installRoot $script:ProtectedScriptName
+    $copyProblem = ''
+    if (-not [System.IO.File]::Exists($protectedPath)) {
+        $copyProblem = "there is no copy of this script at $(Format-Unbreakable -Text $protectedPath) yet, for the task to run: run an update first, then set it up"
+    } elseif ((Get-FileHashHex -Path $protectedPath) -ne $script:scriptSha256) {
+        $copyProblem = "the copy at $(Format-Unbreakable -Text $protectedPath) ($(Get-ScriptVersionFromFile -Path $protectedPath)) is not this file ($($script:WorkstationVersion)): run an update with this file first, then set it up"
+    }
+    if ($copyProblem) {
+        Add-Result -Group $group -Name 'task' -Status 'FAIL' -Detail 'not set up (see Failures)'
+        Add-RunFailure -Message "scheduled update: $copyProblem"
+        Write-ConsoleLine -Text "NOT DONE: $copyProblem" -Indent 2 -ContinuationIndent 4
+        return
+    }
+    try {
+        Register-NotificationAppId
+        $detail = "registered as '$($script:NotificationAppName)' for $($script:account)"
+        Add-Result -Group $group -Name 'notifications' -Status 'PASS' -Detail $detail
+        Write-ConsoleLine -Text "notifications: $detail" -Indent 2 -ContinuationIndent 4
+    } catch {
+        Add-Result -Group $group -Name 'notifications' -Status 'WARN' -Detail "their name isn't registered: they show as Windows PowerShell's (see Warnings)"
+        Add-RunWarning -Message "scheduled update: the notifications' name ($($script:NotificationAppName)) could not be registered: $(Get-OneLineMessage -ErrorRecord $_)"
+    }
+    try {
+        $replacedExisting = [bool](Get-ScheduledUpdateTask)
+        Register-ScheduledUpdateTask -ScriptPath $protectedPath -Account $script:account
+        $task = Get-ScheduledUpdateTask
+        $problems = @(Get-ScheduledUpdateTaskProblem -Task $task -ScriptPath $protectedPath)
+        if ($problems.Count -gt 0) { throw "the task registered reads back otherwise: $($problems -join '; ')" }
+        $State.ScheduledUpdate = @{
+            TaskFolder = $script:ScheduledTaskFolder; TaskName = $script:ScheduledTaskName; Account = $script:account; ScriptPath = $protectedPath
+            DailyAtLocalTime = $script:ScheduledUpdateTime; NotificationAppId = $script:NotificationAppId; SetUpUtc = (Format-UtcTime -Time (Get-Date))
+        }
+        Save-State -State $State -Path $script:statePath
+        $detail = "daily at $($script:ScheduledUpdateTime) local time, or when the machine is next on; as $($script:account), elevated, while logged on; next run $(Get-ScheduledUpdateNextRunText -Task $task)"
+        if ($replacedExisting) { $detail = "replaced the existing task: $detail" }
+        Add-Result -Group $group -Name 'task' -Status 'PASS' -Detail $detail
+        Write-ConsoleLine -Text "task $($script:ScheduledTaskFolder)$($script:ScheduledTaskName): $detail" -Indent 2 -ContinuationIndent 4
+    } catch {
+        Add-Result -Group $group -Name 'task' -Status 'FAIL' -Detail 'not set up (see Failures)'
+        Add-RunFailure -Message "scheduled update: the task could not be set up: $(Get-OneLineMessage -ErrorRecord $_)"
+    }
+}
+
+# -ScheduledUpdate Disable: the task and the notifications' name removed,
+# and the task's folder when empty, task or no task (one left by a task
+# removed in Task Scheduler too); the record goes with them.
+function Disable-ScheduledUpdate {
+    param($State)
+    $group = 'Scheduled update'
+    try {
+        $task = Get-ScheduledUpdateTask
+        $detail = 'there was none to remove'
+        if ($task) {
+            Unregister-ScheduledTask -TaskPath $script:ScheduledTaskFolder -TaskName $script:ScheduledTaskName -Confirm:$false -ErrorAction Stop
+            $detail = "$($script:ScheduledTaskFolder)$($script:ScheduledTaskName) removed"
+        }
+        try {
+            if (Remove-EmptyScheduledTaskFolder) {
+                if ($task) { $detail += ', with its folder' } else { $detail += "; its empty folder $($script:ScheduledTaskFolder) removed" }
+            }
+        } catch { Add-LogLine -Text "  The task's folder $($script:ScheduledTaskFolder) was left: $(Get-OneLineMessage -ErrorRecord $_)" }
+        if ($State.ContainsKey('ScheduledUpdate')) {
+            $State.Remove('ScheduledUpdate')
+            Save-State -State $State -Path $script:statePath
+        }
+        Add-Result -Group $group -Name 'task' -Status 'PASS' -Detail $detail
+        Write-ConsoleLine -Text "task: $detail" -Indent 2 -ContinuationIndent 4
+    } catch {
+        Add-Result -Group $group -Name 'task' -Status 'FAIL' -Detail 'not removed (see Failures)'
+        Add-RunFailure -Message "scheduled update: the task could not be removed: $(Get-OneLineMessage -ErrorRecord $_)"
+    }
+    try {
+        Unregister-NotificationAppId
+        Add-Result -Group $group -Name 'notifications' -Status 'PASS' -Detail "the name '$($script:NotificationAppName)' removed for $($script:account)"
+    } catch {
+        Add-Result -Group $group -Name 'notifications' -Status 'WARN' -Detail "their name is still registered (see Warnings)"
+        Add-RunWarning -Message "scheduled update: the notifications' name could not be removed: $(Get-OneLineMessage -ErrorRecord $_)"
+    }
+}
+
+# The run log as an address a notification can open, or '' before the log
+# exists.
+function Get-RunLogUri {
+    if (-not $script:logPath -or -not [System.IO.File]::Exists($script:logPath)) { return '' }
+    return ([Uri]$script:logPath).AbsoluteUri
+}
+
+# Show one Windows notification under an AppUserModelID; a click opens
+# $LaunchUri (protocol activation: Windows opens it, at the desktop's
+# rights, after this run has ended too). Throws where Windows refuses it.
+# The WinRT types are named with ContentType = WindowsRuntime, Windows
+# PowerShell 5.1's way of loading them without a module.
+function Show-WindowsNotification {
+    param([string]$AppId, [string]$Title, [string]$Body, [string]$LaunchUri)
+    $null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+    $null = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
+    $activation = ''
+    if ($LaunchUri) { $activation = " activationType=`"protocol`" launch=`"$([System.Security.SecurityElement]::Escape($LaunchUri))`"" }
+    $toastXml = "<toast$activation><visual><binding template=`"ToastGeneric`"><text>$([System.Security.SecurityElement]::Escape($Title))</text><text>$([System.Security.SecurityElement]::Escape($Body))</text></binding></visual></toast>"
+    $document = New-Object Windows.Data.Xml.Dom.XmlDocument
+    $document.LoadXml($toastXml)
+    $notification = New-Object Windows.UI.Notifications.ToastNotification $document
+    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($AppId).Show($notification)
+}
+
+# A scheduled run's notification: said on the console and in the log, then
+# shown under the tool's own name, else Windows PowerShell's. Sent after the
+# result block, so it never changes the verdict; one that can't be shown is
+# logged.
+function Send-RunNotification {
+    param([string]$Title, [string]$Body, [string]$LaunchUri = '')
+    $Body = $Body.Replace($script:UnbreakableSpace, ' ')
+    if ($Body.Length -gt $script:NotificationBodyMaxLength) { $Body = $Body.Substring(0, $script:NotificationBodyMaxLength - 3) + '...' }
+    $opens = ''
+    if ($LaunchUri) { $opens = " (a click opens $LaunchUri)" }
+    Write-ConsoleLine -Text "Notification: $Title. $Body$opens" -ContinuationIndent 2
+    foreach ($appId in @($script:NotificationAppId, $script:NotificationFallbackAppId)) {
+        try {
+            Show-WindowsNotification -AppId $appId -Title $Title -Body $Body -LaunchUri $LaunchUri
+            return
+        } catch {
+            Write-ConsoleLine -Text "Not shown as ${appId}: $(Get-OneLineMessage -ErrorRecord $_)" -Indent 2 -ContinuationIndent 4
+        }
+    }
+}
+
+# What a scheduled run tells the analyst at its end: each page awaiting a
+# hand download (one notification per page, a click opens it), and a run
+# that failed (a click opens the log). A warning tells nobody.
+function Send-ScheduledRunNotification {
+    param([string]$Overall, $HandDownloadPages)
+    foreach ($page in $HandDownloadPages) {
+        Send-RunNotification -Title "Download by hand: $($page.FileName)" -LaunchUri $page.Url `
+            -Body "$($page.Tools -join ' and ') can't be updated until $($page.FileName) is in $(Get-DownloadsFolder). Click to open the vendor's page."
+    }
+    if ($Overall -ne 'FAIL') { return }
+    $body = 'See the log.'
+    if ($script:runFailures.Count -gt 0) { $body = "$($script:runFailures.Count) failure(s); the first: $($script:runFailures[0])" }
+    Send-RunNotification -Title 'Forensic workstation update failed' -Body $body -LaunchUri (Get-RunLogUri)
 }
 
 # --- Tool actions ---
@@ -2776,10 +3200,10 @@ function Test-ToolSigner {
     $descriptions = foreach ($exe in @(@($CatalogueTool.Gui) + @($CatalogueTool.Cli) | Where-Object { $_ })) {
         $exePath = Join-Path $Folder $exe
         if (-not [System.IO.File]::Exists($exePath)) { throw "$exe is missing" }
-        $check = Test-SignerAccepted -SignerInfo (Get-SignerInfo -Path $exePath) -ExpectedSigner $familyRow.ExpectedSigner -UnsignedAllowed $familyRow.UnsignedAllowed
         $expectedText = $familyRow.ExpectedSigner
         if (-not $expectedText) { $expectedText = 'unsigned (the catalogue names no signer for this family)' }
-        if (-not $check.Accepted) { throw "$exe is signed by $($check.Description), expected $expectedText" }
+        $check = Test-SignerAccepted -SignerInfo (Get-SignerInfo -Path $exePath) -ExpectedSigner $familyRow.ExpectedSigner -UnsignedAllowed $familyRow.UnsignedAllowed -ExpectedDescription $expectedText
+        if (-not $check.Accepted) { throw "$exe $($check.Refusal)" }
         "${exe}: $($check.Description)"
     }
     return @($descriptions)
@@ -3693,8 +4117,9 @@ function Write-ResultBlock {
     }
     # Every warning and failure counts towards the verdict, also those raised
     # without a result of their own (e.g. an old copy that couldn't be
-    # deleted): none can leave the run PASS.
-    $statuses = @($script:results | ForEach-Object { $_.Status })
+    # deleted): none can leave the run PASS. An INFO line is information
+    # only (the scheduled task's state) and grades nothing.
+    $statuses = @($script:results | Where-Object { $_.Status -ne 'INFO' } | ForEach-Object { $_.Status })
     if ($script:runWarnings.Count -gt 0) { $statuses += 'WARN' }
     if ($script:runFailures.Count -gt 0) { $statuses += 'FAIL' }
     $overall = Get-WorstStatus -Statuses $statuses
@@ -3719,7 +4144,9 @@ function Write-ResultBlock {
     $groups = @($script:results | ForEach-Object { $_.Group } | Select-Object -Unique)
     foreach ($group in $groups) {
         $groupResults = @($script:results | Where-Object { $_.Group -eq $group })
-        $status = Get-WorstStatus -Statuses @($groupResults | ForEach-Object { $_.Status })
+        $gradedStatuses = @($groupResults | Where-Object { $_.Status -ne 'INFO' } | ForEach-Object { $_.Status })
+        $status = 'INFO'
+        if ($gradedStatuses.Count -gt 0) { $status = Get-WorstStatus -Statuses $gradedStatuses }
         $passCount = @($groupResults | Where-Object { $_.Status -eq 'PASS' }).Count
         if ($groupResults.Count -eq 1) {
             Write-StatusLine -Status $status -Text (Format-SingleResultText -Group $group -Result $groupResults[0])
@@ -3756,7 +4183,11 @@ $gitHubReleasesByRepository = @{}
 $useColour = -not [Console]::IsOutputRedirected
 # The window closes with the run when Explorer started it (a shortcut,
 # "Run with PowerShell") or -Pause asks: every exit then waits for a key.
-$pauseAtExit = $Pause.IsPresent -or (Test-StartedFromExplorer)
+# A scheduled run never waits: nobody is there to press it.
+$pauseAtExit = ($Pause.IsPresent -or (Test-StartedFromExplorer)) -and -not $Scheduled
+# A scheduled run records how it ended, at every exit (Exit-Run); one that
+# hands over to a new release leaves it to that release's run.
+$recordScheduledRunAtExit = [bool]$Scheduled
 
 # -Confirm would make every cmdlet below ask before it acts; the run's plan
 # is shown by -CheckOnly instead.
@@ -3776,8 +4207,11 @@ if ($dryRun -and $Verify) {
     Exit-Run -Code 3
 }
 $mode = 'update'
+if ($Scheduled) { $mode = 'update (scheduled run)' }
 if ($dryRun) { $mode = 'dry run (nothing is changed)' }
 if ($Verify) { $mode = 'verify (re-hash installed files)' }
+if ($ScheduledUpdate -eq 'Enable') { $mode = 'scheduled update: set it up (nothing else is changed)' }
+if ($ScheduledUpdate -eq 'Disable') { $mode = 'scheduled update: remove it (nothing else is changed)' }
 # A selection typed at a prompt arrives as an array; one passed through
 # -File (the shortcut, a relaunch) as one string, "a,b": each value is split
 # on commas, so both forms select the same.
@@ -3785,6 +4219,17 @@ $Family = @($Family | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Tri
 $Category = @($Category | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $Tool = @($Tool | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $selectionGiven = ($Family.Count -gt 0 -or $Category.Count -gt 0 -or $Tool.Count -gt 0)
+# -ScheduledUpdate sets up or removes the task and does nothing else; a
+# scheduled run (-Scheduled) is a full update. Neither takes another mode
+# or a selection.
+if ($ScheduledUpdate -and ($dryRun -or $Verify -or $Scheduled -or $selectionGiven)) {
+    Write-Host 'Stopped: -ScheduledUpdate sets up or removes the scheduled update and does nothing else; run it on its own.'
+    Exit-Run -Code 3
+}
+if ($Scheduled -and ($dryRun -or $Verify -or $selectionGiven)) {
+    Write-Host "Stopped: -Scheduled is the scheduled update's own run, a full update; it takes no other mode or selection."
+    Exit-Run -Code 3
+}
 
 $elevated = Test-Elevated
 $osName = Get-OsName
@@ -3842,6 +4287,9 @@ if (-not [Environment]::Is64BitProcess) { Stop-Run -Reason 'run it from 64-bit W
 # through UAC, the update runs in its own window (kept open at the end),
 # and this run ends with its exit code. Without a desktop to ask on, or
 # when the user declines, it stops.
+# A scheduled run has no one to answer UAC: its task runs it elevated, and
+# one that isn't stops (and says so in a notification).
+if ($Scheduled -and -not $elevated) { Stop-Run -Reason "the scheduled run didn't get administrator rights: its task must run with the highest privileges. Set it up again with -ScheduledUpdate Enable." }
 if (-not $dryRun -and -not $Verify -and -not $elevated) {
     # Where Windows "elevates" without giving administrator rights (UAC
     # turned off, a filtered token), the relaunch is no better than this
@@ -3909,7 +4357,9 @@ if (-not $readOnlyMode) {
 if (-not $readOnlyMode) {
     $updateLock = $null
     try { $updateLock = Enter-UpdateLock } catch { Stop-Run -Reason "the update lock can't be taken: $(Get-OneLineMessage -ErrorRecord $_)" }
-    if (-not $updateLock) { Stop-Run -Reason 'another update run holds the update lock: one in progress on this machine, or one stopped with Ctrl+C in a window still open. Let it finish, or close that window, then run again.' }
+    # Expected for a scheduled run (the analyst's own update is running):
+    # no notification; the next day's run catches up.
+    if (-not $updateLock) { Stop-Run -WithoutNotification -Reason 'another update run holds the update lock: one in progress on this machine, or one stopped with Ctrl+C in a window still open. Let it finish, or close that window, then run again.' }
     if ($updateLock.Abandoned) { Write-ConsoleLine -Text 'An earlier update run ended without releasing the update lock (it was stopped, or Windows ended it); this run takes it over.' -ContinuationIndent 2 }
 }
 
@@ -3932,6 +4382,18 @@ try {
     Stop-Run -Reason "state.json ($(Format-Unbreakable -Text $statePath)) can't be read, so what this script installed is unknown: $(Get-OneLineMessage -ErrorRecord $_)"
 }
 
+# --- Scheduled update mode: its task set up or removed, nothing else ---
+if ($ScheduledUpdate) {
+    Write-SectionHeading -Title 'Scheduled update'
+    if ($ScheduledUpdate -eq 'Enable') { Enable-ScheduledUpdate -State $state } else { Disable-ScheduledUpdate -State $state }
+    $scheduledUpdateCoverage = 'setting up the scheduled update (its task and its notifications); nothing else was changed.'
+    if ($ScheduledUpdate -eq 'Disable') { $scheduledUpdateCoverage = 'removing the scheduled update (its task and its notifications); nothing else was changed.' }
+    Add-ScheduledTaskStatusResult -State $state
+    $overall = Write-ResultBlock -Coverage $scheduledUpdateCoverage
+    Write-ConsoleLine -Text "Log: $(Format-Unbreakable -Text $logPath)"
+    switch ($overall) { 'PASS' { Exit-Run -Code 0 } 'WARN' { Exit-Run -Code 1 } default { Exit-Run -Code 2 } }
+}
+
 # --- Verify mode ---
 if ($Verify) {
     Write-SectionHeading -Title 'Verifying installed files against files.csv'
@@ -3952,6 +4414,7 @@ if ($Verify) {
     }
     $verifyCoverage = 'every file installed by this script, re-hashed against files.csv'
     if ($selectionGiven) { $verifyCoverage = "the files of the selected tools ($($selectionParts -join '; ')), re-hashed against files.csv" }
+    Add-ScheduledTaskStatusResult -State $state
     $overall = Write-ResultBlock -Coverage $verifyCoverage
     switch ($overall) { 'PASS' { Exit-Run -Code 0 } 'WARN' { Exit-Run -Code 1 } default { Exit-Run -Code 2 } }
 }
@@ -4207,7 +4670,9 @@ foreach ($check in @($toolChecks | Where-Object { @('NotInstalled', 'Changed', '
 foreach ($check in @($ancillaryChecks | Where-Object { @('NotInstalled', 'Changed') -contains $_.Status -or $_.ToolWillChange })) {
     $plan.Add((Format-PlanLine -Action 'Sync' -Text "$($check.Row.Description) ($($check.Row.Tool) --sync)"))
 }
-foreach ($check in @($toolChecks | Where-Object { $_.Status -eq 'AwaitingDownload' })) { $plan.Add((Format-PlanLine -Action 'Download' -Text "by hand: $($check.Remote.FileName) from $($check.Remote.Url) into $(Format-Unbreakable -Text (Get-DownloadsFolder)); an update run opens that page in the default browser; this run can't install $($check.Tool.Name)")) }
+$pageHandOffText = 'an update run opens that page in the default browser'
+if ($Scheduled) { $pageHandOffText = 'a notification offers that page' }
+foreach ($check in @($toolChecks | Where-Object { $_.Status -eq 'AwaitingDownload' })) { $plan.Add((Format-PlanLine -Action 'Download' -Text "by hand: $($check.Remote.FileName) from $($check.Remote.Url) into $(Format-Unbreakable -Text (Get-DownloadsFolder)); $pageHandOffText; this run can't install $($check.Tool.Name)")) }
 foreach ($name in $removableTools) { $plan.Add((Format-PlanLine -Action 'Remove' -Text "$name (no longer in the catalogue)")) }
 foreach ($item in $removablePrerequisiteVersions) {
     $reason = 'no tool needs it'
@@ -4247,6 +4712,7 @@ if ($dryRun) {
     foreach ($item in $removablePrerequisiteVersions) { Add-Result -Group 'Clean-up' -Name "$($item.DisplayName) $($item.Version)" -Status 'WARN' -Detail 'would be removed' }
     foreach ($name in $removableTools) { Add-Result -Group 'Clean-up' -Name $name -Status 'WARN' -Detail 'would be removed' }
     $coverage = 'dry run: is every selected tool current? Nothing was changed.'
+    Add-ScheduledTaskStatusResult -State $state
     $overall = Write-ResultBlock -Coverage $coverage
     Write-ConsoleLine -Text "Log: $(Format-Unbreakable -Text $logPath)"
     switch ($overall) { 'PASS' { Exit-Run -Code 0 } 'WARN' { Exit-Run -Code 1 } default { Exit-Run -Code 2 } }
@@ -4348,7 +4814,13 @@ if ($scriptCheck.ReleaseStatus -eq 'Changed') {
         Write-ConsoleLine -Text "This run ($WorkstationVersion) ends here and hands over to $($scriptCheck.Remote.Version), which runs now in this window with the same selection and its own log." -ContinuationIndent 2
         $handoverExitCode = 2
         Exit-UpdateLock          # the new version takes the lock itself
-        try { $handoverExitCode = Invoke-ScriptRelaunch -ScriptPath $scriptCheck.ProtectedPath } catch { Write-ConsoleLine -Text "The new version could not be started: $(Get-OneLineMessage -ErrorRecord $_)" }
+        try {
+            $handoverExitCode = Invoke-ScriptRelaunch -ScriptPath $scriptCheck.ProtectedPath
+            $recordScheduledRunAtExit = $false     # the new release's run recorded its own outcome
+        } catch {
+            Write-ConsoleLine -Text "The new version could not be started: $(Get-OneLineMessage -ErrorRecord $_)"
+            if ($Scheduled) { Send-RunNotification -Title 'Forensic workstation update failed' -Body "This script's new version $($scriptCheck.Remote.Version) was installed but could not be started: $(Get-OneLineMessage -ErrorRecord $_)" -LaunchUri (Get-RunLogUri) }
+        }
         $pauseAtExit = $false     # the new version paused when asked to
         Exit-Run -Code $handoverExitCode
     }
@@ -4399,6 +4871,9 @@ if ($prerequisiteChecks.Count -eq 0 -and $neededPrerequisites.Count -eq 0) {
 # --- Update: tools ---
 Write-SectionHeading -Title 'Tools'
 $openedPages = @()
+# A scheduled run opens no page: each page awaiting a hand download is a
+# notification at the end, one per page (Url, FileName, Tools).
+$handDownloadPages = New-Object System.Collections.Generic.List[object]
 if (@($toolChecks | Where-Object { $_.MoveFrom }).Count -eq 0) {
     Write-NothingToDoLine -Statuses @($toolChecks | ForEach-Object { $_.Status }) -NoActionStatuses @('Current', 'Unknown', 'Unavailable', 'AwaitingDownload')
 }
@@ -4438,8 +4913,16 @@ foreach ($check in $toolChecks) {
             Add-Result -Group $group -Name $catalogueTool.Name -Status 'WARN' -Detail "to download by hand (see Warnings)"
             Add-RunWarning -Message "$($catalogueTool.Name): $($check.Detail)"
             # The vendor's page opens in the default browser once per page, at
-            # the desktop's rights, so the download can start now.
-            if ([Environment]::UserInteractive -and $openedPages -notcontains $check.Remote.Url) {
+            # the desktop's rights, so the download can start now; a
+            # scheduled run gathers the pages for its notifications instead.
+            if ($Scheduled) {
+                $page = @($handDownloadPages | Where-Object { $_.Url -eq $check.Remote.Url }) | Select-Object -First 1
+                if (-not $page) {
+                    $page = [pscustomobject]@{ Url = $check.Remote.Url; FileName = $check.Remote.FileName; Tools = New-Object System.Collections.Generic.List[string] }
+                    $handDownloadPages.Add($page)
+                }
+                $page.Tools.Add($catalogueTool.Name)
+            } elseif ([Environment]::UserInteractive -and $openedPages -notcontains $check.Remote.Url) {
                 try {
                     Open-PageInDefaultBrowser -Url $check.Remote.Url
                     $openedPages += $check.Remote.Url
@@ -4653,6 +5136,8 @@ try { Remove-OwnedFolder -Path $stagingFolder -Root $recordsRoot } catch { Add-R
 
 $coverage = 'every tool in the catalogue, its prerequisites and ancillary content'
 if ($selectionGiven) { $coverage = "the selected tools only ($selectionText)" }
+Add-ScheduledTaskStatusResult -State $state
 $overall = Write-ResultBlock -Coverage $coverage
+if ($Scheduled) { Send-ScheduledRunNotification -Overall $overall -HandDownloadPages $handDownloadPages }
 Write-ConsoleLine -Text "Log: $(Format-Unbreakable -Text $logPath)"
 switch ($overall) { 'PASS' { Exit-Run -Code 0 } 'WARN' { Exit-Run -Code 1 } default { Exit-Run -Code 2 } }
