@@ -4,6 +4,64 @@ Notable changes to `Update-ForensicWorkstation.ps1`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.0 - 2026-10-28
+
+### Added
+- One update run at a time: an update holds a machine-wide lock, and a
+  second update run stops before any work (exit 3). The dry run and
+  `-Verify` don't take it.
+- An update stops before any work (exit 3) when it runs as an account other
+  than the one whose desktop it is (elevated with another administrator's
+  credentials), or when that account can't be read: shortcuts, grants and
+  the Sysinternals EULA would go to the wrong account.
+
+### Changed
+- After `--sync`, a tool file on record outside the content folder that was
+  changed or removed is a FAIL (was a WARN); a file not on record there
+  afterwards stays a WARN, and one removed is logged. The same comparison
+  follows a `--sync` that failed or was stopped. User data (granted and
+  kept paths) is no longer compared. Files not on record are warned of
+  once per top-level entry (a folder with its count), each file listed in
+  the log.
+- The section line of a synced content set carries what changed outside its
+  folder, as its result line does.
+- An update removes the staging folders earlier runs left (a run stopped,
+  or one that handed over to a newer release).
+- A tool's writable grants are set on the new copy before the swap, so a
+  grant that fails leaves the installed copy in place.
+- `-Verify` with a selection names it in the verdict line; tools in the
+  selection that aren't installed are listed.
+- A run log that can't be written is said on the console at once and is a
+  WARN.
+
+### Fixed
+- `-Verify` could PASS while a tool on record had no files in `files.csv`
+  (or only user data); that is now a FAIL. A tool that can't be read fails
+  alone instead of ending the verification, and a tool folder that can't be
+  listed whole is a FAIL.
+- `--sync` re-recorded the tool's own files with their hashes after the
+  sync, so a file it changed or removed passed `-Verify` from then on. They
+  stay on record as installed.
+- Clean-up could remove a .NET runtime line a tool still ran on, when that
+  tool's update to a newer line failed or was skipped (in use). The line is
+  now kept, with a WARN, until no tool on record needs it.
+- A new copy that couldn't be moved into place left the tool only in its
+  `.old` folder, which the next run deleted. The previous copy is now put
+  back; one an interrupted update left aside is put back at the start of
+  the next run.
+- A junction or link in a folder the account may write (`Temp`, `Settings`,
+  ...) could be followed by the elevated update when it carried the user
+  data over, copying or granting wherever it pointed. No folder walk follows
+  one now: such user data fails the tool's update, `-Verify` fails any
+  junction or link in a tool's folder, and the `--sync` comparison fails on
+  one.
+- `inventory.csv` and `files.csv` are written through a temporary file, as
+  `state.json` is, so an interrupted write can't leave them truncated.
+- A process stopped at its timeout was reported as stopped even when it
+  wasn't.
+- A path quoted in a warning or failure (an exception's message) was wrapped
+  at a space inside it; it is kept whole.
+
 ## 0.3.0 - 2026-10-27
 
 ### Added

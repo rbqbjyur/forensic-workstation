@@ -52,7 +52,12 @@ for four seconds.
 - Checks EvtxECmd's maps, RECmd's batch files and SQLECmd's maps on every run
   by the last commit to their folder upstream, and runs the tool's own
   `--sync` when it has changed. Files retired upstream are removed (`--sync`
-  alone keeps them).
+  alone keeps them). Outside the content folder `--sync` should change
+  nothing, and that part of the tool's folder is compared after every
+  `--sync`, failed or not, graded as `-Verify` grades it: a tool file on
+  record changed or removed is a FAIL, a file not on record there
+  afterwards a WARN. The tool's files stay on record as installed, so
+  `-Verify` reports the same.
 - Verifies every download: SHA-256, the vendor's published hash where there
   is one (.NET, Arsenal Image Mounter, the Visual C++ Redistributable, AIM's
   driver package), the Authenticode signer of every exe it installs, AIM's
@@ -69,7 +74,8 @@ for four seconds.
   everything).
 - Removes what it installed and no longer needs: tools dropped from the
   catalogue, superseded prerequisite versions, runtime lines no tool needs.
-  It never removes anything it didn't install.
+  It never removes anything it didn't install, nor a runtime line an
+  installed tool still runs on (its update failed or was skipped).
 - Writes a log per run, and an inventory and per-file SHA-256 record of what
   is installed.
 - Keeps a copy of itself under Program Files, with a Desktop and Start Menu
@@ -100,7 +106,9 @@ Unblock-File .\Update-ForensicWorkstation-*.ps1
 
 - 64-bit Windows (amd64), Windows PowerShell 5.1, no modules. Tested on
   Windows 11 24H2; not tested on Windows 10.
-- An elevated prompt for an update; `-CheckOnly` and `-Verify` run without.
+- An elevated prompt for an update, as the account whose desktop it is;
+  `-CheckOnly` and `-Verify` run without. One update runs at a time on a
+  machine.
 - Internet access to the vendors' download sites, GitHub (the maps, and
   this script's releases) and Microsoft's .NET release metadata, through
   the account's system proxy settings. GitHub allows 60 calls an hour per
@@ -128,7 +136,7 @@ Unblock-File .\Update-ForensicWorkstation-*.ps1
 | Parameter | Effect |
 |---|---|
 | `-CheckOnly` | The dry run: every source is checked and every action an update would take is listed; nothing changes. `-WhatIf` does the same. |
-| `-Verify` | Re-hashes the installed files against `files.csv` and lists files missing, changed or not on record. No network access. |
+| `-Verify` | Re-hashes the installed files against `files.csv` and lists files missing, changed or not on record; a tool on record in `state.json` with no files in `files.csv` is a FAIL. No network access. |
 | `-Family` | Limits the run to these families (where the tools come from): `Zimmerman`, `NirSoft`, `Sysinternals`, `Arsenal`, `SRUM-DUMP`. |
 | `-Category` | Limits the run to these categories (what the tools examine; the table below). A name may be given without its spaces: `-Category FileActivity`. |
 | `-Tool` | Limits the run to these tools (names as in the catalogue). |
@@ -136,7 +144,8 @@ Unblock-File .\Update-ForensicWorkstation-*.ps1
 | `-NoSelfUpdate` | Runs this copy as it is, without checking for a newer release. The run handed over after a self-update uses it. |
 | `-ElevatedRelaunch` | Set by the script itself on the run it starts elevated; such a run that still has no administrator rights stops instead of relaunching again. |
 
-Exit codes: 0 PASS, 1 WARN, 2 FAIL, 3 stopped before any work.
+Exit codes: 0 PASS, 1 WARN, 2 FAIL, 3 stopped before any work (e.g.
+another update run in progress, or an update elevated as another account).
 
 ## The catalogue
 
@@ -255,7 +264,9 @@ JumpList Explorer's and SDB Explorer's `Settings.xml`, and the `Temp` folder
 where
 AmcacheParser, SQLECmd, SrumECmd, SumECmd and WxTCmd copy the databases
 they read. A tool folder on the PATH is never writable; only a subfolder
-of it may be. These are kept across updates and are not verified. Only the
+of it may be. These are kept across updates and are not verified; one
+that holds a junction or link (a standard process can make one there) is
+never followed: that tool's update fails, and `-Verify` fails it. Only the
 x64 builds of the Sysinternals tools are installed; autorunsc has a folder of
 its own, so `autorunsc64` is on the PATH and the Autoruns GUI is not;
 SRUM-DUMP likewise: the GUI's copy has the shortcut, the `srum_dump` copy
@@ -299,9 +310,11 @@ and records.
 *The result block: the verdict and each group.*
 
 The records show what was installed, from where, with which hashes, and when,
-and `-Verify` shows whether the files are still those bytes. They don't show
-how a tool was used, and they say nothing about a file changed or replaced by
-anything else between runs beyond what `-Verify` finds.
+and `-Verify` shows whether the files are still those bytes. The commit
+recorded for synced content is the one upstream when the run checked;
+`--sync` downloads the branch moments later. They don't show how a tool was
+used, and they say nothing about a file changed or replaced by anything
+else between runs beyond what `-Verify` finds.
 
 ## What it does not do
 
@@ -313,10 +326,12 @@ anything else between runs beyond what `-Verify` finds.
   ''` in your copy turns it off for good. A copy whose SHA-256 isn't the one
   published for its version (an adapted copy) never updates itself.
 - It installs nothing for other accounts on the machine: per-user items
-  (shortcuts, the Sysinternals EULA) are for the account that runs it.
+  (shortcuts, settings grants, the Sysinternals EULA) are for the account
+  that runs it, which must be the account whose desktop it is. An update
+  elevated with another administrator's credentials stops.
 - It doesn't keep custom EvtxECmd or SQLECmd maps or RECmd batch files across
   a sync.
-- No scheduled runs, no Microsoft Defender exclusions and no self-update yet.
+- No scheduled runs and no Microsoft Defender exclusions yet.
 - It doesn't download Arsenal Image Mounter (you do; see the catalogue).
 - It never removes the Visual C++ Redistributable or AIM's driver; Windows'
   driver store keeps each AIM driver package installed.

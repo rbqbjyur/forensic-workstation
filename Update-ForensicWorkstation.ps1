@@ -106,7 +106,7 @@ param(
 
 # ============================== CONFIG ==============================
 
-$WorkstationVersion = '0.3.0'
+$WorkstationVersion = '0.4.0'
 
 # No script-wide error suppression: every unit of work has its own try/catch.
 # Progress bars are off: Invoke-WebRequest in PowerShell 5.1 is many times
@@ -137,6 +137,11 @@ $ProcessTimeoutMinutes = 15
 # to complete (reported as a WARN).
 $InstallerSuccessExitCodes = @(0, 3010)
 $RestartRequiredExitCode = 3010
+
+# One update run at a time on this machine: an update holds this named
+# mutex from its preconditions to its exit, and a second update run stops
+# before any work. The dry run and -Verify change nothing and don't take it.
+$UpdateLockName = 'Global\ForensicWorkstationUpdate'
 
 # --- Families ---
 # A family is where its tools come from: one vendor, one signer. Fields:
@@ -545,6 +550,13 @@ function Format-Unbreakable {
     return $Text.Replace(' ', $script:UnbreakableSpace)
 }
 
+# A message with every path it quotes ('C:\...' or '\\...', as .NET's
+# exception messages quote them) kept whole when it is wrapped.
+function Format-QuotedPathUnbreakable {
+    param([string]$Text)
+    return [regex]::Replace($Text, "'(?:[A-Za-z]:\\|\\\\)[^']*'", { param($match) Format-Unbreakable -Text $match.Value })
+}
+
 # A version as shown in the console: without the build metadata after "+"
 # (the Zimmerman tools' commit id); the records keep the whole string.
 function Format-DisplayVersion {
@@ -571,10 +583,20 @@ function Write-ConsoleLine {
 
 # One line in the log (the console has it already). Until the log file
 # exists, lines are kept and written when it is created (MAIN).
+# A line that can't be written is counted: the first failure is said on the
+# console at once (Write-Host, not Write-ConsoleLine, which would come back
+# here), and the result block counts them as a warning (Write-ResultBlock).
 function Add-LogLine {
     param([string]$Text)
     if ($script:logPath) {
-        try { [System.IO.File]::AppendAllText($script:logPath, $Text + "`r`n", $script:utf8NoBom) } catch {}
+        try {
+            [System.IO.File]::AppendAllText($script:logPath, $Text + "`r`n", $script:utf8NoBom)
+        } catch {
+            $script:logWriteFailureCount++
+            if ($script:logWriteFailureCount -eq 1) {
+                foreach ($line in @(Format-WrappedText -Text "The run log can't be written ($(Get-OneLineMessage -ErrorRecord $_)); lines from here on may be missing from it.")) { Write-Host $line }
+            }
+        }
     } else {
         $script:pendingLogLines.Add($Text)
     }
@@ -600,11 +622,13 @@ function Stop-Run {
     Exit-Run -Code 3
 }
 
-# Every exit goes through here: when the window would close with the run
-# (-Pause, or started from Explorer: a shortcut, "Run with PowerShell"), it
-# waits for a key first, so the result can be read.
+# Every exit goes through here: the update lock is released (a window
+# waiting for a key doesn't hold up the next run), and when the window would
+# close with the run (-Pause, or started from Explorer: a shortcut, "Run
+# with PowerShell"), it waits for a key first, so the result can be read.
 function Exit-Run {
     param([int]$Code)
+    Exit-UpdateLock
     if ($script:pauseAtExit -and -not [Console]::IsInputRedirected) {
         Write-Host ''
         Write-Host 'Press any key to close this window.'
@@ -622,6 +646,60 @@ function Test-StartedFromExplorer {
         $parent = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$parentId" -ErrorAction Stop
         return ([string]$parent.Name -ieq 'explorer.exe')
     } catch { return $false }
+}
+
+# Take the machine-wide update lock ($UpdateLockName). Returns the held
+# mutex, or $null when another update run holds it. A lock left by a run
+# that ended without releasing it (killed, a crash) is taken over: Windows
+# reports it as abandoned, and the caller says so.
+function Enter-UpdateLock {
+    $mutex = New-Object System.Threading.Mutex($false, $script:UpdateLockName)
+    $acquired = $false
+    $abandoned = $false
+    try {
+        $acquired = $mutex.WaitOne(0)
+    } catch {
+        # PowerShell wraps the .NET exception: the abandoned lock is ours now.
+        if ($_.Exception -is [System.Threading.AbandonedMutexException] -or $_.Exception.InnerException -is [System.Threading.AbandonedMutexException]) {
+            $acquired = $true
+            $abandoned = $true
+        } else {
+            $mutex.Dispose()
+            throw
+        }
+    }
+    if (-not $acquired) { $mutex.Dispose(); return $null }
+    return [pscustomobject]@{ Mutex = $mutex; Abandoned = $abandoned }
+}
+
+# Release the update lock when this run holds it (every exit, and before the
+# hand-over to a new version, which takes it itself).
+function Exit-UpdateLock {
+    if (-not $script:updateLock) { return }
+    try { $script:updateLock.Mutex.ReleaseMutex() } catch {}
+    try { $script:updateLock.Mutex.Dispose() } catch {}
+    $script:updateLock = $null
+}
+
+# The SID of the account whose desktop this session shows: the owner of the
+# desktop shell (explorer.exe) in this process's session. '' when there is
+# none or it can't be read.
+function Get-DesktopAccountSid {
+    $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+    $owners = @(foreach ($shell in @(Get-CimInstance -ClassName Win32_Process -Filter "Name='explorer.exe' AND SessionId=$sessionId" -ErrorAction Stop)) {
+            $owner = Invoke-CimMethod -InputObject $shell -MethodName GetOwnerSid -ErrorAction Stop
+            if ($owner.ReturnValue -eq 0 -and $owner.Sid) { [string]$owner.Sid }
+        })
+    $distinctOwners = @($owners | Sort-Object -Unique)
+    if ($distinctOwners.Count -ne 1) { return '' }      # none, or shells of several accounts: can't tell
+    return $distinctOwners[0]
+}
+
+# An account's name from its SID, for messages; the SID itself where it
+# can't be translated.
+function Get-AccountNameFromSid {
+    param([string]$Sid)
+    try { return (New-Object System.Security.Principal.SecurityIdentifier($Sid)).Translate([System.Security.Principal.NTAccount]).Value } catch { return $Sid }
 }
 
 # A section opens the same way every time: a blank line, a rule, the title.
@@ -1206,12 +1284,19 @@ function Read-State {
 }
 
 # Write the state: after every change, so a run that stops part-way still
-# knows what it owns. Written to a temporary file first, then moved over.
+# knows what it owns.
 function Save-State {
     param($State, [string]$Path)
     $json = ConvertTo-Json -InputObject $State -Depth 12
+    Write-TextFileReplacing -Path $Path -Text (($json -replace "`r?`n", "`r`n") + "`r`n")
+}
+
+# Write a whole text file (UTF-8 without BOM) so that it is never seen half
+# written: to a temporary file beside it first, then moved over the old one.
+function Write-TextFileReplacing {
+    param([string]$Path, [string]$Text)
     $temporaryPath = "$Path.new"
-    [System.IO.File]::WriteAllText($temporaryPath, (($json -replace "`r?`n", "`r`n") + "`r`n"), $script:utf8NoBom)
+    [System.IO.File]::WriteAllText($temporaryPath, $Text, $script:utf8NoBom)
     # No backup file: File.Replace takes a null backup path. PowerShell 5.1
     # passes $null to a .NET string as '' (which File.Replace refuses), so
     # the null is [NullString]::Value.
@@ -1640,6 +1725,28 @@ function Resolve-Prerequisite {
     return $resolved.ToArray()
 }
 
+# The tools on record whose installed builds a .NET line still serves (by
+# its major, and a flavour it covers): checked just before the line is
+# removed, after this run's updates and removals, since a tool whose update
+# to a newer line failed or was skipped (in use) still runs on the old one.
+# A tool on record with no catalogue row (dropped, its removal failed) has
+# no Requires to read: any line of its build's major counts as needed.
+function Get-ToolsStillServedByDotNetLine {
+    param([string]$Id, $State)
+    $prerequisite = Get-PrerequisiteFromId -Id $Id
+    $servedTools = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @($State.Tools.Keys | Sort-Object)) {
+        $build = [string]$State.Tools[$name].Build
+        $buildMatch = [regex]::Match($build, '^net(\d+)$')
+        if (-not $buildMatch.Success -or [int]$buildMatch.Groups[1].Value -ne $prerequisite.Major) { continue }
+        $catalogueTool = @($script:Catalogue | Where-Object { $_.Name -eq $name }) | Select-Object -First 1
+        if (-not $catalogueTool) { $servedTools.Add($name); continue }
+        $flavoursNeeded = @(Get-ToolCapability -CatalogueTool $catalogueTool -Build $build | Where-Object { $_ -like 'DotNet:*' } | ForEach-Object { ($_ -split ':')[1] })
+        if (@($flavoursNeeded | Where-Object { $prerequisite.Row.Covers -contains $_ }).Count -gt 0) { $servedTools.Add($name) }
+    }
+    return $servedTools.ToArray()
+}
+
 # A prerequisite from its id: a .NET line ('DotNet:WindowsDesktop:10') or
 # an $OtherPrerequisites capability ('VCRedist:x64'). Id, Kind ('DotNet' or
 # the row's Source), DisplayName, Row, Major (the .NET major; 0 otherwise).
@@ -1893,17 +2000,66 @@ function Remove-ZoneIdentifier {
     return $count
 }
 
+# A file or folder and everything under it, found without going through a
+# junction, symbolic link or mount point (a reparse point): each one met is
+# listed instead, with its target, and not entered. The folders the
+# analyst's account may write in can be turned into junctions from a
+# non-elevated process; an elevated run that went through one would read,
+# copy or grant wherever it points. Folders in $SkipFolders (full paths)
+# are not entered. Returns Files (full paths) and ReparsePoints (Path,
+# Target); a folder that can't be listed throws.
+function Get-FileTree {
+    param([string]$Path, [string[]]$SkipFolders = @())
+    $files = New-Object System.Collections.Generic.List[string]
+    $reparsePoints = New-Object System.Collections.Generic.List[object]
+    $skipped = @($SkipFolders | ForEach-Object { [System.IO.Path]::GetFullPath($_).TrimEnd('\') })
+    $pending = New-Object System.Collections.Generic.Stack[string]
+    if ([System.IO.Directory]::Exists($Path) -or [System.IO.File]::Exists($Path)) { $pending.Push($Path) }
+    while ($pending.Count -gt 0) {
+        $entry = $pending.Pop()
+        $attributes = [System.IO.File]::GetAttributes($entry)       # the entry's own, never its target's
+        if ($attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint)) {
+            $reparsePoints.Add([pscustomobject]@{ Path = $entry; Target = (Get-ReparsePointTarget -Path $entry) })
+        } elseif ($attributes.HasFlag([System.IO.FileAttributes]::Directory)) {
+            if ($skipped -contains [System.IO.Path]::GetFullPath($entry).TrimEnd('\')) { continue }
+            foreach ($child in [System.IO.Directory]::GetFileSystemEntries($entry)) { $pending.Push($child) }
+        } else {
+            $files.Add($entry)
+        }
+    }
+    return [pscustomobject]@{ Files = @($files | Sort-Object); ReparsePoints = @($reparsePoints | Sort-Object -Property Path) }
+}
+
+# Where a reparse point points, as Windows PowerShell reads it (a
+# junction's or symbolic link's target); '' where it can't be read.
+function Get-ReparsePointTarget {
+    param([string]$Path)
+    try { return [string](@((Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Target) -join ', ') } catch { return '' }
+}
+
+# A reparse point for a message: its path and where it points.
+function Format-ReparsePoint {
+    param($ReparsePoint)
+    $target = $ReparsePoint.Target
+    if (-not $target) { $target = '(target not readable)' }
+    return "$(Format-Unbreakable -Text $ReparsePoint.Path) -> $(Format-Unbreakable -Text $target)"
+}
+
 # Every file in a folder (recursively) with its SHA-256, relative to the
-# folder; folders named in $Exclude (relative, top level) are skipped.
+# folder. Files inside $ExcludeFolders, and the files $ExcludeFiles names
+# (both relative to the folder, e.g. 'Maps', 'Bookmarks\User'), are left out;
+# excluded folders aren't entered. A junction or link met is not followed:
+# the snapshot throws, naming it.
 function Get-FolderSnapshot {
-    param([string]$Folder, [string[]]$Exclude = @())
+    param([string]$Folder, [string[]]$ExcludeFolders = @(), [string[]]$ExcludeFiles = @())
     $snapshot = @{}
     if (-not [System.IO.Directory]::Exists($Folder)) { return $snapshot }
-    foreach ($file in @(Get-ChildItem -LiteralPath $Folder -Recurse -File -Force -ErrorAction Stop)) {
-        $relativePath = Get-RelativePath -Path $file.FullName -Root $Folder
-        $topSegment = ($relativePath -split '\\')[0]
-        if ($relativePath -match '\\' -and $Exclude -contains $topSegment) { continue }
-        $snapshot[$relativePath] = [pscustomobject]@{ Length = $file.Length; Sha256 = (Get-FileHashHex -Path $file.FullName) }
+    $tree = Get-FileTree -Path $Folder -SkipFolders @($ExcludeFolders | ForEach-Object { Join-Path $Folder $_ })
+    if ($tree.ReparsePoints.Count -gt 0) { throw ("a junction or link in $(Format-Unbreakable -Text $Folder), not followed: " + (@($tree.ReparsePoints | ForEach-Object { Format-ReparsePoint -ReparsePoint $_ }) -join '; ')) }
+    foreach ($filePath in $tree.Files) {
+        $relativePath = Get-RelativePath -Path $filePath -Root $Folder
+        if ($ExcludeFiles | Where-Object { $relativePath -ieq $_ }) { continue }
+        $snapshot[$relativePath] = [pscustomobject]@{ Length = ([System.IO.FileInfo]$filePath).Length; Sha256 = (Get-FileHashHex -Path $filePath) }
     }
     return $snapshot
 }
@@ -1936,8 +2092,14 @@ function Invoke-ProcessAndWait {
     $process = Start-Process @startArguments -ErrorAction Stop
     $null = $process.Handle          # keeps the handle, so ExitCode is readable after the exit (PowerShell 5.1)
     if (-not $process.WaitForExit($script:ProcessTimeoutMinutes * 60 * 1000)) {
+        # Stopped only if it has exited after Kill; its own child processes
+        # (an installer's) aren't stopped with it.
+        $stopped = $false
         try { $process.Kill() } catch {}
-        throw "$([System.IO.Path]::GetFileName($FilePath)) did not finish within $($script:ProcessTimeoutMinutes) minutes and was stopped"
+        try { $stopped = $process.WaitForExit(30 * 1000) } catch {}
+        $fileName = [System.IO.Path]::GetFileName($FilePath)
+        if ($stopped) { throw "$fileName did not finish within $($script:ProcessTimeoutMinutes) minutes and was stopped" }
+        throw "$fileName did not finish within $($script:ProcessTimeoutMinutes) minutes and could not be stopped (process ID $($process.Id) still running)"
     }
     return $process.ExitCode
 }
@@ -2605,7 +2767,15 @@ function Install-Tool {
         $zoneCount = Remove-ZoneIdentifier -Folder $newFolder
         if ($zoneCount -gt 0) { Write-ConsoleLine -Text "Mark of the Web removed from $zoneCount file(s)." -Indent 4 }
 
+        # The user data is copied from the installed copy, elevated: one that
+        # holds a junction or link (the account may write there) would be
+        # copied, and then granted, from wherever it points. Refused: the
+        # update fails and the installed copy stays.
         $userData = Get-ToolUserDataPath -CatalogueTool $CatalogueTool
+        $userDataLinks = @(foreach ($userDataPath in @($userData.Folders) + @($userData.Files)) { (Get-FileTree -Path (Join-Path $finalFolder $userDataPath)).ReparsePoints })
+        if ($userDataLinks.Count -gt 0) {
+            throw ("its user data holds a junction or link, not followed and not carried over (unexplained: check the account for compromise): " + (@($userDataLinks | ForEach-Object { Format-ReparsePoint -ReparsePoint $_ }) -join '; '))
+        }
         foreach ($keptFolder in $userData.Folders) {
             $keptSource = Join-Path $finalFolder $keptFolder
             if ([System.IO.Directory]::Exists($keptSource)) {
@@ -2619,6 +2789,11 @@ function Install-Tool {
             $keptSource = Join-Path $finalFolder $keptFile
             if ([System.IO.File]::Exists($keptSource)) { Copy-Item -LiteralPath $keptSource -Destination (Join-Path $newFolder $keptFile) -Force -ErrorAction Stop }
         }
+
+        # The writable grants, on the new copy before the swap (the rename
+        # keeps them): one that fails leaves the installed copy untouched.
+        foreach ($writablePath in @($CatalogueTool.WritablePaths | Where-Object { $_ })) { Grant-WritablePath -Path (Join-Path $newFolder $writablePath) }
+        foreach ($writableFile in @($CatalogueTool.WritableFiles | Where-Object { $_ })) { Grant-WritableFile -Path (Join-Path $newFolder $writableFile) }
     } catch {
         try { Remove-OwnedFolder -Path $newFolder -Root $script:installRoot } catch {}
         throw
@@ -2629,7 +2804,9 @@ function Install-Tool {
     # The swap. A tool running from its folder is left alone: Windows lets
     # the folder be renamed under it, but the running tool would then load
     # files from the new copy. The new copy is discarded and the old one
-    # stays. A rename that fails for another reason does the same.
+    # stays. A rename that fails for another reason does the same. A new
+    # copy that can't be moved into place puts the old one back.
+    $previousCopyAside = $false
     if ([System.IO.Directory]::Exists($finalFolder)) {
         $running = @(Get-ProcessRunningFrom -Folder $finalFolder)
         if ($running.Count -gt 0) {
@@ -2642,12 +2819,22 @@ function Install-Tool {
             try { Remove-OwnedFolder -Path $newFolder -Root $script:installRoot } catch {}
             throw [System.InvalidOperationException]::new("in use, not updated (close it and run again): $(Get-OneLineMessage -ErrorRecord $_)")
         }
+        $previousCopyAside = $true
     }
-    [System.IO.Directory]::Move($newFolder, $finalFolder)
+    try {
+        [System.IO.Directory]::Move($newFolder, $finalFolder)
+    } catch {
+        $promotionError = Get-OneLineMessage -ErrorRecord $_
+        try { Remove-OwnedFolder -Path $newFolder -Root $script:installRoot } catch {}
+        if (-not $previousCopyAside) { throw "the new copy could not be put in place: $promotionError" }
+        try {
+            [System.IO.Directory]::Move($oldFolder, $finalFolder)
+        } catch {
+            throw "the new copy could not be put in place ($promotionError), nor the previous copy put back ($(Get-OneLineMessage -ErrorRecord $_)): it is at $(Format-Unbreakable -Text $oldFolder), which the next run puts back"
+        }
+        throw "the new copy could not be put in place ($promotionError); the previous copy was put back"
+    }
     try { Remove-OwnedFolder -Path $oldFolder -Root $script:installRoot } catch { Add-RunWarning -Message "$($CatalogueTool.Name): the previous copy could not be deleted ($(Format-Unbreakable -Text $oldFolder)); the next run removes it." }
-
-    foreach ($writablePath in @($CatalogueTool.WritablePaths | Where-Object { $_ })) { Grant-WritablePath -Path (Join-Path $finalFolder $writablePath) }
-    foreach ($writableFile in @($CatalogueTool.WritableFiles | Where-Object { $_ })) { Grant-WritableFile -Path (Join-Path $finalFolder $writableFile) }
 
     $version = $Remote.Version
     $entryPoint = @(@($CatalogueTool.Gui) + @($CatalogueTool.Cli) | Where-Object { $_ }) | Select-Object -First 1
@@ -2738,7 +2925,14 @@ function Move-ToolFolder {
 # Sync a tool's ancillary content with its own --sync. The content folder is
 # moved aside first, since --sync never removes a file retired upstream; on
 # success the old folder is deleted and the differences counted, on failure
-# it is put back.
+# it is put back. Inside the content folder every change is expected. The
+# rest of the tool's folder (its user data aside) is compared before and
+# after, whether the sync succeeded or not: --sync should change nothing
+# there. The tool's vendor files stay on record as installed, so -Verify
+# reports what the sync run reports. Returns Failure (empty when the sync
+# succeeded), Detail (the content's counts and commit) and Outside (from
+# Group-SyncOutsideDifference; $null when it couldn't be compared, which
+# Failure then says).
 function Sync-AncillaryContent {
     param($AncillaryRow, $Remote, $State)
     $catalogueTool = @($script:Catalogue | Where-Object { $_.Name -eq $AncillaryRow.Tool }) | Select-Object -First 1
@@ -2750,8 +2944,10 @@ function Sync-AncillaryContent {
     $previousFolder = "$contentFolder.previous"
     Remove-OwnedFolder -Path $previousFolder -Root $toolFolder
 
+    $userData = Get-ToolUserDataPath -CatalogueTool $catalogueTool
+    $notCompared = @($AncillaryRow.Folder) + @($userData.Folders)
     $before = Get-FolderSnapshot -Folder $contentFolder
-    $outsideBefore = Get-FolderSnapshot -Folder $toolFolder -Exclude @($AncillaryRow.Folder)
+    $outsideBefore = Get-FolderSnapshot -Folder $toolFolder -ExcludeFolders $notCompared -ExcludeFiles $userData.Files
     if ([System.IO.Directory]::Exists($contentFolder)) { [System.IO.Directory]::Move($contentFolder, $previousFolder) }
 
     $outputPath = Join-Path $script:stagingFolder "$($AncillaryRow.Tool)-sync-output.txt"
@@ -2769,29 +2965,40 @@ function Sync-AncillaryContent {
             Remove-OwnedFile -Path $outputFile -Root $script:stagingFolder
         }
     }
+    # The tool's vendor files on record, outside the content folder: what
+    # -Verify checks there, so what the outside comparison is graded against.
+    $record = $State.Tools[$AncillaryRow.Tool]
+    $contentPrefix = $AncillaryRow.Folder + '\'
+    $vendorFiles = @($record.Files | Where-Object { $_.Class -eq 'Vendor' -and -not $_.RelativePath.StartsWith($contentPrefix, [System.StringComparison]::OrdinalIgnoreCase) })
+
     if ($exitCode -ne 0 -or -not [System.IO.Directory]::Exists($contentFolder)) {
         try { Remove-OwnedFolder -Path $contentFolder -Root $toolFolder } catch {}
         if ([System.IO.Directory]::Exists($previousFolder)) { [System.IO.Directory]::Move($previousFolder, $contentFolder) }
-        if ($syncError) { throw "--sync failed: $syncError; the previous content was put back" }
-        throw "--sync exited with $exitCode; the previous content was put back"
+        if ($syncError) { $failure = "--sync failed: $syncError; the previous content was put back" }
+        else { $failure = "--sync exited with $exitCode; the previous content was put back" }
+        # A sync stopped or failed part way may have left its own work in the
+        # tool's folder (a download, a half extraction): compared as after a
+        # sync that succeeded.
+        $outside = $null
+        try {
+            $outsideAfter = Get-FolderSnapshot -Folder $toolFolder -ExcludeFolders $notCompared -ExcludeFiles $userData.Files
+            $outside = Group-SyncOutsideDifference -Difference (Compare-FolderSnapshot -Before $outsideBefore -After $outsideAfter) -After $outsideAfter -VendorFiles $vendorFiles
+        } catch {
+            $failure += "; outside $($AncillaryRow.Folder) the tool's folder could not be compared: $(Get-OneLineMessage -ErrorRecord $_)"
+        }
+        return [pscustomobject]@{ Failure = $failure; Detail = ''; Outside = $outside }
     }
     Remove-OwnedFolder -Path $previousFolder -Root $toolFolder
 
     $after = Get-FolderSnapshot -Folder $contentFolder
     $difference = Compare-FolderSnapshot -Before $before -After $after
-    $outsideAfter = Get-FolderSnapshot -Folder $toolFolder -Exclude @($AncillaryRow.Folder)
-    $outsideDifference = Compare-FolderSnapshot -Before $outsideBefore -After $outsideAfter
-    $outsideChanges = @($outsideDifference.Added) + @($outsideDifference.Changed) + @($outsideDifference.Removed)
-    if ($outsideChanges.Count -gt 0) {
-        Add-RunWarning -Message ("$($AncillaryRow.Tool) --sync changed files outside $($AncillaryRow.Folder): " + ($outsideChanges -join ', '))
-    }
+    $outsideAfter = Get-FolderSnapshot -Folder $toolFolder -ExcludeFolders $notCompared -ExcludeFiles $userData.Files
+    $outside = Group-SyncOutsideDifference -Difference (Compare-FolderSnapshot -Before $outsideBefore -After $outsideAfter) -After $outsideAfter -VendorFiles $vendorFiles
 
-    # The tool's file record: its vendor files as they are now, plus the
-    # synced content.
-    $record = $State.Tools[$AncillaryRow.Tool]
-    $contentPrefix = $AncillaryRow.Folder + '\'
-    $files = @($record.Files | Where-Object { $_.Class -eq 'Vendor' -and -not $_.RelativePath.StartsWith($contentPrefix, [System.StringComparison]::OrdinalIgnoreCase) -and $outsideAfter.ContainsKey($_.RelativePath) } |
-            ForEach-Object { @{ RelativePath = $_.RelativePath; Length = $outsideAfter[$_.RelativePath].Length; Sha256 = $outsideAfter[$_.RelativePath].Sha256; Class = 'Vendor' } })
+    # The tool's file record: its vendor files as installed (never their
+    # hashes after the sync: a file --sync changed stays a mismatch for
+    # -Verify), plus the synced content as it is now.
+    $files = $vendorFiles
     $files += @($after.Keys | Sort-Object | ForEach-Object { @{ RelativePath = ($contentPrefix + $_); Length = $after[$_].Length; Sha256 = $after[$_].Sha256; Class = 'Ancillary' } })
     $record.Files = $files
 
@@ -2799,7 +3006,102 @@ function Sync-AncillaryContent {
         Commit = $Remote.Marker; CommitUtc = $Remote.CommitUtc; CommitUrl = $Remote.Url; SyncedUtc = (Format-UtcTime -Time (Get-Date))
         FileCount = $after.Count; Added = $difference.Added.Count; Changed = $difference.Changed.Count; Removed = $difference.Removed.Count
     }
-    return ("{0}: {1} files ({2} added, {3} changed, {4} removed), commit {5}" -f $AncillaryRow.Description, $after.Count, $difference.Added.Count, $difference.Changed.Count, $difference.Removed.Count, $Remote.Marker.Substring(0, 12))
+    return [pscustomobject]@{
+        Failure = ''
+        Detail  = ("{0}: {1} files ({2} added, {3} changed, {4} removed), commit {5}" -f $AncillaryRow.Description, $after.Count, $difference.Added.Count, $difference.Changed.Count, $difference.Removed.Count, $Remote.Marker.Substring(0, 12))
+        Outside = $outside
+    }
+}
+
+# Relative paths grouped by the folder they lie under at the top (the part
+# before the first '\'): one group per folder, holding its paths, and one
+# per path at the top itself (Folder empty). Groups in path order.
+function Group-PathByTopFolder {
+    param([string[]]$Paths)
+    $groups = New-Object System.Collections.Generic.List[object]
+    $groupByFolder = @{}
+    foreach ($path in @($Paths | Sort-Object)) {
+        $separatorIndex = $path.IndexOf('\')
+        if ($separatorIndex -lt 0) { $groups.Add([pscustomobject]@{ Folder = ''; Paths = @($path) }); continue }
+        $folder = $path.Substring(0, $separatorIndex)
+        if (-not $groupByFolder.ContainsKey($folder)) {
+            $groupByFolder[$folder] = [pscustomobject]@{ Folder = $folder; Paths = (New-Object System.Collections.Generic.List[string]) }
+            $groups.Add($groupByFolder[$folder])
+        }
+        $groupByFolder[$folder].Paths.Add($path)
+    }
+    return $groups.ToArray()
+}
+
+# Sort what --sync changed outside its content folder as -Verify grades the
+# folder afterwards ($After, the folder's snapshot then): a vendor file on
+# record that was removed, or changed or written back with other bytes than
+# its record's, is a mismatch (FAIL); one changed or written back with its
+# record's bytes matches, so it is only logged (VendorRestored); a file not
+# on record that is there afterwards, added or changed, is "not on record"
+# (WARN); a file not on record that was removed leaves nothing for -Verify
+# to report, so it is only logged.
+function Group-SyncOutsideDifference {
+    param($Difference, [hashtable]$After, $VendorFiles)
+    $recordedSha256 = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($file in $VendorFiles) { $recordedSha256[$file.RelativePath] = $file.Sha256 }
+    $vendorWritten = @(@($Difference.Changed) + @($Difference.Added) | Where-Object { $recordedSha256.ContainsKey($_) } | Sort-Object)
+    return [pscustomobject]@{
+        VendorChanged     = @($vendorWritten | Where-Object { $After[$_].Sha256 -ne $recordedSha256[$_] })
+        VendorRestored    = @($vendorWritten | Where-Object { $After[$_].Sha256 -eq $recordedSha256[$_] })
+        VendorRemoved     = @($Difference.Removed | Where-Object { $recordedSha256.ContainsKey($_) })
+        UnrecordedAdded   = @($Difference.Added | Where-Object { -not $recordedSha256.ContainsKey($_) })
+        UnrecordedChanged = @($Difference.Changed | Where-Object { -not $recordedSha256.ContainsKey($_) })
+        UnrecordedRemoved = @($Difference.Removed | Where-Object { -not $recordedSha256.ContainsKey($_) })
+    }
+}
+
+# Report what --sync did outside its content folder (Group-SyncOutsideDifference):
+# each vendor file changed or removed a failure; the files not on record
+# there afterwards a warning per top-level entry (Group-PathByTopFolder): a
+# file named as it is, or a folder with its count, its files in the log
+# (a sync stopped part way can leave a repository's whole tree). Returns the status this gives (PASS, WARN or
+# FAIL), the text it adds to the content's line, and the lines for the log
+# alone (LogLines: each vendor file back at its recorded bytes, each file
+# not on record removed), which the caller writes after the content's line.
+function Add-SyncOutsideFinding {
+    param($Outside, [string]$ToolName, [string]$ContentFolderName)
+    $status = 'PASS'
+    $text = ''
+    $logLines = New-Object System.Collections.Generic.List[string]
+    if ($Outside.UnrecordedAdded.Count -gt 0) {
+        $status = 'WARN'
+        $text += "; $($Outside.UnrecordedAdded.Count) file(s) added outside $ContentFolderName (see Warnings)"
+        foreach ($group in @(Group-PathByTopFolder -Paths $Outside.UnrecordedAdded)) {
+            if ($group.Paths.Count -eq 1) { Add-RunWarning -Message "$ToolName --sync added a file outside ${ContentFolderName}: $($group.Paths[0])"; continue }
+            Add-RunWarning -Message "$ToolName --sync added $($group.Paths.Count) files outside $ContentFolderName, under $($group.Folder)\ (each listed in the log)"
+            foreach ($path in $group.Paths) { $logLines.Add("    $ToolName --sync added a file outside ${ContentFolderName}: $path") }
+        }
+    }
+    if ($Outside.UnrecordedChanged.Count -gt 0) {
+        $status = 'WARN'
+        $text += "; $($Outside.UnrecordedChanged.Count) file(s) not on record changed outside $ContentFolderName (see Warnings)"
+        foreach ($group in @(Group-PathByTopFolder -Paths $Outside.UnrecordedChanged)) {
+            if ($group.Paths.Count -eq 1) { Add-RunWarning -Message "$ToolName --sync changed a file outside $ContentFolderName that isn't on record: $($group.Paths[0])"; continue }
+            Add-RunWarning -Message "$ToolName --sync changed $($group.Paths.Count) files outside $ContentFolderName that aren't on record, under $($group.Folder)\ (each listed in the log)"
+            foreach ($path in $group.Paths) { $logLines.Add("    $ToolName --sync changed a file outside $ContentFolderName that isn't on record: $path") }
+        }
+    }
+    if ($Outside.VendorChanged.Count -gt 0 -or $Outside.VendorRemoved.Count -gt 0) {
+        $status = 'FAIL'
+        $text += "; outside $ContentFolderName $($Outside.VendorChanged.Count) file(s) changed, $($Outside.VendorRemoved.Count) removed (see Failures)"
+        foreach ($path in $Outside.VendorChanged) { Add-RunFailure -Message "$ToolName --sync changed a file outside ${ContentFolderName}: $path" }
+        foreach ($path in $Outside.VendorRemoved) { Add-RunFailure -Message "$ToolName --sync removed a file outside ${ContentFolderName}: $path" }
+    }
+    if ($Outside.VendorRestored.Count -gt 0) {
+        $text += "; $($Outside.VendorRestored.Count) file(s) on record written outside $ContentFolderName with their recorded bytes (listed in the log)"
+        foreach ($path in $Outside.VendorRestored) { $logLines.Add("    $ToolName --sync wrote a file outside $ContentFolderName, now with its recorded bytes: $path") }
+    }
+    if ($Outside.UnrecordedRemoved.Count -gt 0) {
+        $text += "; $($Outside.UnrecordedRemoved.Count) file(s) not on record removed outside $ContentFolderName (listed in the log)"
+        foreach ($path in $Outside.UnrecordedRemoved) { $logLines.Add("    $ToolName --sync removed a file outside $ContentFolderName that wasn't on record: $path") }
+    }
+    return [pscustomobject]@{ Status = $status; Text = $text; LogLines = $logLines.ToArray() }
 }
 
 # --- PATH, shortcuts, EULA ---
@@ -3061,7 +3363,7 @@ function Set-SysinternalsEula {
 # Write a records file: UTF-8 without BOM, CRLF (shared rules).
 function Write-RecordFile {
     param([string]$Path, [string[]]$Lines)
-    [System.IO.File]::WriteAllText($Path, (($Lines | ForEach-Object { $_ + "`r`n" }) -join ''), $script:utf8NoBom)
+    Write-TextFileReplacing -Path $Path -Text (($Lines | ForEach-Object { $_ + "`r`n" }) -join '')
 }
 
 # inventory.csv: every tool and prerequisite version on record, the
@@ -3141,66 +3443,121 @@ function Get-FileRecordLine {
 # --- Verify mode ---
 
 # Re-hash every file in files.csv; list files missing, changed, and files in
-# a tool's folder that aren't on record (its user data aside).
+# a tool's folder that aren't on record (its user data aside). Every name in
+# $ToolNames that $InstalledNames has on record must have its files in
+# files.csv: one without is a FAIL, never left out of the result. Each tool
+# is verified on its own, so one that can't be read doesn't stop the rest.
+# Returns the names in $ToolNames that aren't installed (nothing to verify).
 function Invoke-Verification {
-    param([string]$FilesCsvPath, [string[]]$ToolNames)
+    param([string]$FilesCsvPath, [string[]]$ToolNames, [string[]]$InstalledNames)
     if (-not [System.IO.File]::Exists($FilesCsvPath)) { throw "no files.csv at ${FilesCsvPath}: nothing to verify against" }
     $rows = @(Import-Csv -LiteralPath $FilesCsvPath -Encoding UTF8)
-    $byTool = $rows | Group-Object -Property Tool
-    foreach ($group in $byTool) {
-        $toolName = $group.Name
-        if ($ToolNames -notcontains $toolName) { continue }
+    if ($rows.Count -gt 0) {
+        $columns = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
+        $missingColumns = @(@('Tool', 'Class', 'RelativePath', 'Sha256') | Where-Object { $columns -notcontains $_ })
+        if ($missingColumns.Count -gt 0) { throw "files.csv has no column $($missingColumns -join ', ')" }
+    }
+    $rowsByTool = @{}
+    foreach ($group in @($rows | Group-Object -Property Tool)) { $rowsByTool[$group.Name] = @($group.Group) }
+    # In files.csv's order (the result block's), then the names it lacks.
+    $csvToolNames = @($rows | ForEach-Object { $_.Tool } | Select-Object -Unique)
+    $orderedNames = @($csvToolNames | Where-Object { $ToolNames -contains $_ }) + @($ToolNames | Where-Object { $csvToolNames -notcontains $_ })
+    $notInstalled = New-Object System.Collections.Generic.List[string]
+    foreach ($toolName in $orderedNames) {
+        if (-not $rowsByTool.ContainsKey($toolName)) {
+            if ($InstalledNames -contains $toolName) {
+                $catalogueTool = @($script:Catalogue | Where-Object { $_.Name -eq $toolName }) | Select-Object -First 1
+                $groupName = 'Script'
+                if ($catalogueTool) { $groupName = $catalogueTool.Category }
+                Add-Result -Group $groupName -Name $toolName -Status 'FAIL' -Detail 'installed, but files.csv has no files of it (see Failures)'
+                Add-RunFailure -Message "${toolName}: installed (state.json), but files.csv has no files of it: nothing to verify against"
+            } else {
+                $notInstalled.Add($toolName)
+            }
+            continue
+        }
+        $toolRows = $rowsByTool[$toolName]
         # The result's group: the tool's category, or its family in a
         # files.csv written before 0.3.0 (no Category column).
-        $groupName = [string]$group.Group[0].Category
-        if (-not $groupName) { $groupName = $group.Group[0].Family }
-        $missing = New-Object System.Collections.Generic.List[string]
-        $changed = New-Object System.Collections.Generic.List[string]
-        $recorded = @{}
-        $verifiedRows = @($group.Group | Where-Object { $_.Class -ne 'UserData' })     # user data is listed, never verified
-        foreach ($row in $verifiedRows) {
-            $path = Join-Path $script:installRoot $row.RelativePath
-            $recorded[$row.RelativePath.ToLowerInvariant()] = $true
-            if (-not [System.IO.File]::Exists($path)) { $missing.Add($row.RelativePath); continue }
-            if ((Get-FileHashHex -Path $path) -ne $row.Sha256) { $changed.Add($row.RelativePath) }
+        $groupName = [string]$toolRows[0].Category
+        if (-not $groupName) { $groupName = $toolRows[0].Family }
+        try {
+            Test-ToolFilesAgainstRecord -ToolName $toolName -GroupName $groupName -ToolRows $toolRows
+        } catch {
+            Add-Result -Group $groupName -Name $toolName -Status 'FAIL' -Detail "can't be verified (see Failures)"
+            Add-RunFailure -Message "${toolName}: can't be verified: $(Get-OneLineMessage -ErrorRecord $_)"
         }
-        $catalogueTool = @($script:Catalogue | Where-Object { $_.Name -eq $toolName }) | Select-Object -First 1
-        $extra = New-Object System.Collections.Generic.List[string]
-        # The tool's folder as files.csv has it: the two segments above its
-        # files (<Category>\<Tool>; <Family>\<Tool> before 0.3.0). The
-        # script's own row sits at the root and has no folder to scan.
-        $toolFolder = ''
-        $pathSegments = @([string]$group.Group[0].RelativePath -split '\\')
-        if ($pathSegments.Count -gt 2) { $toolFolder = Join-Path (Join-Path $script:installRoot $pathSegments[0]) $pathSegments[1] }
-        $userDataFolders = @()
-        $userDataFiles = @()
-        if ($catalogueTool) {
-            $userData = Get-ToolUserDataPath -CatalogueTool $catalogueTool
-            $userDataFolders = $userData.Folders
-            $userDataFiles = $userData.Files
-        }
-        if ($toolFolder -and [System.IO.Directory]::Exists($toolFolder)) {
-            foreach ($file in @(Get-ChildItem -LiteralPath $toolFolder -Recurse -File -Force)) {
-                $relativeToRoot = Get-RelativePath -Path $file.FullName -Root $script:installRoot
-                if ($recorded.ContainsKey($relativeToRoot.ToLowerInvariant())) { continue }
-                $relativeToTool = Get-RelativePath -Path $file.FullName -Root $toolFolder
-                if ($userDataFolders | Where-Object { $relativeToTool.StartsWith("$_\", [System.StringComparison]::OrdinalIgnoreCase) }) { continue }
-                if ($userDataFiles | Where-Object { $relativeToTool -ieq $_ }) { continue }
-                $extra.Add($relativeToRoot)
-            }
-        }
-        $total = $verifiedRows.Count
-        if ($missing.Count -gt 0 -or $changed.Count -gt 0) {
-            Add-Result -Group $groupName -Name $toolName -Status 'FAIL' -Detail "$($missing.Count) missing, $($changed.Count) changed of $total (see Failures)"
-            foreach ($path in $missing) { Add-RunFailure -Message "missing: $path" }
-            foreach ($path in $changed) { Add-RunFailure -Message "changed: $path" }
-        } elseif ($extra.Count -gt 0) {
-            Add-Result -Group $groupName -Name $toolName -Status 'WARN' -Detail "$total of $total match; $($extra.Count) file(s) not on record (see Warnings)"
-        } else {
-            Add-Result -Group $groupName -Name $toolName -Status 'PASS' -Detail "$total of $total files match files.csv"
-        }
-        foreach ($path in $extra) { Add-RunWarning -Message "not on record: $path" }
     }
+    return $notInstalled.ToArray()
+}
+
+# Verify one tool's files against its files.csv rows and add its result: a
+# file missing or changed is a FAIL, a file in its folder not on record
+# (user data aside) a WARN. A tool with no file to verify is a FAIL: its
+# record is incomplete, and "0 of 0 match" would prove nothing.
+function Test-ToolFilesAgainstRecord {
+    param([string]$ToolName, [string]$GroupName, [object[]]$ToolRows)
+    $missing = New-Object System.Collections.Generic.List[string]
+    $changed = New-Object System.Collections.Generic.List[string]
+    $recorded = @{}
+    $verifiedRows = @($ToolRows | Where-Object { $_.Class -ne 'UserData' })     # user data is listed, never verified
+    if ($verifiedRows.Count -eq 0) {
+        Add-Result -Group $GroupName -Name $ToolName -Status 'FAIL' -Detail 'files.csv lists no installed file of it (see Failures)'
+        Add-RunFailure -Message "${ToolName}: files.csv lists only user data for it, no installed file: nothing to verify against"
+        return
+    }
+    foreach ($row in $verifiedRows) {
+        $path = Join-Path $script:installRoot $row.RelativePath
+        $recorded[$row.RelativePath.ToLowerInvariant()] = $true
+        if (-not [System.IO.File]::Exists($path)) { $missing.Add($row.RelativePath); continue }
+        if ((Get-FileHashHex -Path $path) -ne $row.Sha256) { $changed.Add($row.RelativePath) }
+    }
+    $catalogueTool = @($script:Catalogue | Where-Object { $_.Name -eq $ToolName }) | Select-Object -First 1
+    $extra = New-Object System.Collections.Generic.List[string]
+    # The tool's folder as files.csv has it: the two segments above its
+    # files (<Category>\<Tool>; <Family>\<Tool> before 0.3.0). The
+    # script's own row sits at the root and has no folder to scan.
+    $toolFolder = ''
+    $pathSegments = @([string]$ToolRows[0].RelativePath -split '\\')
+    if ($pathSegments.Count -gt 2) { $toolFolder = Join-Path (Join-Path $script:installRoot $pathSegments[0]) $pathSegments[1] }
+    $userDataFolders = @()
+    $userDataFiles = @()
+    if ($catalogueTool) {
+        $userData = Get-ToolUserDataPath -CatalogueTool $catalogueTool
+        $userDataFolders = $userData.Folders
+        $userDataFiles = $userData.Files
+    }
+    # The folder is listed without going through a junction or link (each
+    # one is a FAIL: nothing the script installs is one); a folder that can't
+    # be listed whole fails the tool, rather than leaving files out of the
+    # "not on record" check.
+    $links = @()
+    if ($toolFolder -and [System.IO.Directory]::Exists($toolFolder)) {
+        $tree = Get-FileTree -Path $toolFolder
+        $links = @($tree.ReparsePoints)
+        foreach ($filePath in $tree.Files) {
+            $relativeToRoot = Get-RelativePath -Path $filePath -Root $script:installRoot
+            if ($recorded.ContainsKey($relativeToRoot.ToLowerInvariant())) { continue }
+            $relativeToTool = Get-RelativePath -Path $filePath -Root $toolFolder
+            if ($userDataFolders | Where-Object { $relativeToTool.StartsWith("$_\", [System.StringComparison]::OrdinalIgnoreCase) }) { continue }
+            if ($userDataFiles | Where-Object { $relativeToTool -ieq $_ }) { continue }
+            $extra.Add($relativeToRoot)
+        }
+    }
+    $total = $verifiedRows.Count
+    if ($missing.Count -gt 0 -or $changed.Count -gt 0 -or $links.Count -gt 0) {
+        $detail = "$($missing.Count) missing, $($changed.Count) changed of $total"
+        if ($links.Count -gt 0) { $detail += ", $($links.Count) junction(s) or link(s)" }
+        Add-Result -Group $GroupName -Name $ToolName -Status 'FAIL' -Detail "$detail (see Failures)"
+        foreach ($path in $missing) { Add-RunFailure -Message "missing: $path" }
+        foreach ($path in $changed) { Add-RunFailure -Message "changed: $path" }
+        foreach ($link in $links) { Add-RunFailure -Message "junction or link, not followed: $(Format-ReparsePoint -ReparsePoint $link)" }
+    } elseif ($extra.Count -gt 0) {
+        Add-Result -Group $GroupName -Name $ToolName -Status 'WARN' -Detail "$total of $total match; $($extra.Count) file(s) not on record (see Warnings)"
+    } else {
+        Add-Result -Group $GroupName -Name $ToolName -Status 'PASS' -Detail "$total of $total files match files.csv"
+    }
+    foreach ($path in $extra) { Add-RunWarning -Message "not on record: $path" }
 }
 
 # --- The end of the run ---
@@ -3234,13 +3591,14 @@ function Format-ResultItemText {
 # explanation.
 function Write-ResultBlock {
     param([string]$Coverage)
+    if ($script:logWriteFailureCount -gt 0) { Add-RunWarning -Message "The run log could not be written $($script:logWriteFailureCount) time(s): it misses lines of this run (the console has them)." }
     if ($script:runWarnings.Count -gt 0) {
         Write-SectionHeading -Title 'Warnings'
-        foreach ($warning in $script:runWarnings) { Write-ConsoleLine -Text "- $warning" -Indent 2 -ContinuationIndent 4 }
+        foreach ($warning in $script:runWarnings) { Write-ConsoleLine -Text "- $(Format-QuotedPathUnbreakable -Text $warning)" -Indent 2 -ContinuationIndent 4 }
     }
     if ($script:runFailures.Count -gt 0) {
         Write-SectionHeading -Title 'Failures'
-        foreach ($failure in $script:runFailures) { Write-ConsoleLine -Text "- $failure" -Indent 2 -ContinuationIndent 4 }
+        foreach ($failure in $script:runFailures) { Write-ConsoleLine -Text "- $(Format-QuotedPathUnbreakable -Text $failure)" -Indent 2 -ContinuationIndent 4 }
     }
     # Every warning and failure counts towards the verdict, also those raised
     # without a result of their own (e.g. an old copy that couldn't be
@@ -3295,6 +3653,8 @@ $runStamp = $runStartUtc.ToString('yyyyMMddTHHmmssZ')
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $pendingLogLines = New-Object System.Collections.Generic.List[string]
 $logPath = ''
+$logWriteFailureCount = 0
+$updateLock = $null           # the update lock while this run holds it (Enter-UpdateLock)
 $results = New-Object System.Collections.Generic.List[object]
 $runWarnings = New-Object System.Collections.Generic.List[string]
 $runFailures = New-Object System.Collections.Generic.List[string]
@@ -3430,6 +3790,32 @@ if ($selectionGiven) {
             ($Family | Where-Object { $_ -ieq $row.Family }) -or ($Category | Where-Object { Test-SameCategoryName -First $_ -Second $row.Category }) -or ($Tool | Where-Object { $_ -ieq $row.Name }) })
 }
 
+# An update is for the account whose desktop this is (one analyst, the
+# analyst's own administrator account): shortcuts, the writable grants and
+# the Sysinternals EULA go to the account the run runs as. Elevated with
+# another account's credentials (UAC asking for an administrator's
+# password), they would go to that account: the run stops. Where the
+# desktop's account can't be read, it stops too (unknown is not a match).
+if (-not $readOnlyMode) {
+    $runAccountSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $desktopAccountSid = ''
+    try { $desktopAccountSid = Get-DesktopAccountSid } catch {}
+    if (-not $desktopAccountSid) {
+        Stop-Run -Reason "whose desktop this is can't be read (no desktop shell, explorer.exe, of a single account in this session), so it can't be confirmed that this run's account ($account) is the analyst's: shortcuts, grants and the Sysinternals EULA go to the account the run runs as."
+    }
+    if ($desktopAccountSid -ne $runAccountSid) {
+        Stop-Run -Reason "this run runs as $account, but the desktop is $(Get-AccountNameFromSid -Sid $desktopAccountSid)'s: shortcuts, grants and the Sysinternals EULA would go to $account. Run it from the analyst's own administrator account."
+    }
+}
+
+# One update run at a time ($UpdateLockName): held from here to the exit.
+if (-not $readOnlyMode) {
+    $updateLock = $null
+    try { $updateLock = Enter-UpdateLock } catch { Stop-Run -Reason "the update lock can't be taken: $(Get-OneLineMessage -ErrorRecord $_)" }
+    if (-not $updateLock) { Stop-Run -Reason 'another update run holds the update lock: one in progress on this machine, or one stopped with Ctrl+C in a window still open. Let it finish, or close that window, then run again.' }
+    if ($updateLock.Abandoned) { Write-ConsoleLine -Text 'An earlier update run ended without releasing the update lock (it was stopped, or Windows ended it); this run takes it over.' -ContinuationIndent 2 }
+}
+
 try {
     if (-not $readOnlyMode) { New-ProtectedFolder -Path $recordsRoot }    # before anything is created inside it
     $null = [System.IO.Directory]::CreateDirectory($runFolder)
@@ -3455,11 +3841,21 @@ if ($Verify) {
     try {
         $verifiedNames = @($selectedTools | ForEach-Object { $_.Name })
         if (-not $selectionGiven) { $verifiedNames += $ProtectedScriptName }     # the protected copy of this script, with everything
-        Invoke-Verification -FilesCsvPath (Join-Path $recordsRoot 'files.csv') -ToolNames $verifiedNames
+        # What state.json has on record as installed: each of these must have
+        # its files in files.csv.
+        $installedNames = @($state.Tools.Keys)
+        if ($state.Script -and $state.Script.Path) { $installedNames += $ProtectedScriptName }
+        $notInstalledNames = @(Invoke-Verification -FilesCsvPath (Join-Path $recordsRoot 'files.csv') -ToolNames $verifiedNames -InstalledNames $installedNames)
+        if ($notInstalledNames.Count -gt 0) {
+            Write-ConsoleLine -Text 'Not installed, nothing to verify:' -Indent 2
+            foreach ($name in $notInstalledNames) { Write-ConsoleLine -Text "- $name" -Indent 4 }
+        }
     } catch {
         Add-Result -Group 'Verify' -Name 'files.csv' -Status 'FAIL' -Detail (Get-OneLineMessage -ErrorRecord $_)
     }
-    $overall = Write-ResultBlock -Coverage 'every file installed by this script, re-hashed against files.csv'
+    $verifyCoverage = 'every file installed by this script, re-hashed against files.csv'
+    if ($selectionGiven) { $verifyCoverage = "the files of the selected tools ($($selectionParts -join '; ')), re-hashed against files.csv" }
+    $overall = Write-ResultBlock -Coverage $verifyCoverage
     switch ($overall) { 'PASS' { Exit-Run -Code 0 } 'WARN' { Exit-Run -Code 1 } default { Exit-Run -Code 2 } }
 }
 
@@ -3768,10 +4164,26 @@ try {
 # Leftovers of an interrupted run, or of a removal whose copy couldn't be
 # deleted (a tool's .new or .old folder), are the script's own: removed
 # before anything else, and the folder they were in with them when that is
-# left empty. The folders under the install root are the categories' (and
-# the families' on a workstation built before 0.3.0).
+# left empty. One exception: a tool's .old folder with no folder of its own
+# beside it, for a tool on record there, is its only copy (an update stopped
+# between its two renames): it is put back, not removed. The folders under
+# the install root are the categories' (and the families' on a workstation
+# built before 0.3.0).
+$recordedToolFolders = @($state.Tools.Values | ForEach-Object { [System.IO.Path]::GetFullPath((Get-ToolInstalledFolder -Record $_)) })
 foreach ($parentFolder in @([System.IO.Directory]::GetDirectories($installRoot))) {
     foreach ($leftover in @([System.IO.Directory]::GetDirectories($parentFolder) | Where-Object { $_ -match '\.(new|old)$' })) {
+        $originalFolder = $leftover.Substring(0, $leftover.Length - 4)
+        $isOnlyCopy = $leftover.EndsWith('.old') -and -not [System.IO.Directory]::Exists($originalFolder) -and ($recordedToolFolders -contains [System.IO.Path]::GetFullPath($originalFolder))
+        if ($isOnlyCopy) {
+            try {
+                Assert-PathInside -Path $originalFolder -Root $installRoot
+                [System.IO.Directory]::Move($leftover, $originalFolder)
+                Write-ConsoleLine -Text "Put back the copy an interrupted update left aside: $(Format-Unbreakable -Text $originalFolder)" -Indent 2 -ContinuationIndent 4
+            } catch {
+                Add-RunWarning -Message "The copy an interrupted update left aside could not be put back: $(Format-Unbreakable -Text $leftover) ($(Get-OneLineMessage -ErrorRecord $_))"
+            }
+            continue
+        }
         try {
             Remove-OwnedFolder -Path $leftover -Root $installRoot
             Write-ConsoleLine -Text "Removed a leftover of an earlier run: $(Format-Unbreakable -Text $leftover)" -Indent 2
@@ -3779,6 +4191,18 @@ foreach ($parentFolder in @([System.IO.Directory]::GetDirectories($installRoot))
         } catch {
             Add-RunWarning -Message "A leftover of an earlier run could not be removed: $(Format-Unbreakable -Text $leftover) ($(Get-OneLineMessage -ErrorRecord $_))"
         }
+    }
+}
+# The staging folder of an earlier run (one stopped or killed, or one that
+# handed over to a newer release) is a leftover too: this run holds the
+# update lock, so no other run is using one.
+$stagingParentFolder = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($stagingFolder))
+foreach ($leftover in @([System.IO.Directory]::GetDirectories($stagingParentFolder) | Where-Object { [System.IO.Path]::GetFullPath($_) -ine [System.IO.Path]::GetFullPath($stagingFolder) })) {
+    try {
+        Remove-OwnedFolder -Path $leftover -Root $recordsRoot
+        Write-ConsoleLine -Text "Removed a leftover of an earlier run: $(Format-Unbreakable -Text $leftover)" -Indent 2
+    } catch {
+        Add-RunWarning -Message "A leftover of an earlier run could not be removed: $(Format-Unbreakable -Text $leftover) ($(Get-OneLineMessage -ErrorRecord $_))"
     }
 }
 
@@ -3823,6 +4247,7 @@ if ($scriptCheck.ReleaseStatus -eq 'Changed') {
         Write-ConsoleLine -Text ''
         Write-ConsoleLine -Text "This run ($WorkstationVersion) ends here and hands over to $($scriptCheck.Remote.Version), which runs now in this window with the same selection and its own log." -ContinuationIndent 2
         $handoverExitCode = 2
+        Exit-UpdateLock          # the new version takes the lock itself
         try { $handoverExitCode = Invoke-ScriptRelaunch -ScriptPath $scriptCheck.ProtectedPath } catch { Write-ConsoleLine -Text "The new version could not be started: $(Get-OneLineMessage -ErrorRecord $_)" }
         $pauseAtExit = $false     # the new version paused when asked to
         Exit-Run -Code $handoverExitCode
@@ -3991,10 +4416,31 @@ foreach ($check in $ancillaryChecks) {
     }
     Write-ConsoleLine -Text "Syncing $name" -Indent 2
     try {
-        $detail = Sync-AncillaryContent -AncillaryRow $check.Row -Remote $check.Remote -State $state
-        Save-State -State $state -Path $statePath
-        Add-Result -Group 'Ancillary content' -Name $name -Status 'PASS' -Detail $detail
-        Write-ConsoleLine -Text $detail -Indent 4
+        $sync = Sync-AncillaryContent -AncillaryRow $check.Row -Remote $check.Remote -State $state
+        if ($sync.Failure) {
+            Add-RunFailure -Message "${name}: $($sync.Failure)"
+            $syncStatuses = @('FAIL')
+            $consoleText = "FAILED: $($sync.Failure)"
+            $detail = 'not synced (see Failures)'
+        } else {
+            Save-State -State $state -Path $statePath
+            $syncStatuses = @('PASS')
+            $consoleText = $sync.Detail
+            $detail = $sync.Detail
+        }
+        # Outside the content folder --sync should change nothing: graded as
+        # -Verify grades the folder afterwards (Add-SyncOutsideFinding).
+        $outsideLogLines = @()
+        if ($sync.Outside) {
+            $outsideFinding = Add-SyncOutsideFinding -Outside $sync.Outside -ToolName $check.Row.Tool -ContentFolderName $check.Row.Folder
+            $syncStatuses += $outsideFinding.Status
+            $consoleText += $outsideFinding.Text
+            $detail += $outsideFinding.Text
+            $outsideLogLines = $outsideFinding.LogLines
+        }
+        Write-ConsoleLine -Text $consoleText -Indent 4
+        foreach ($outsideLogLine in $outsideLogLines) { Add-LogLine -Text $outsideLogLine }
+        Add-Result -Group 'Ancillary content' -Name $name -Status (Get-WorstStatus -Statuses $syncStatuses) -Detail $detail
     } catch {
         $message = Get-OneLineMessage -ErrorRecord $_
         Add-Result -Group 'Ancillary content' -Name $name -Status 'FAIL' -Detail 'not synced (see Failures)'
@@ -4030,6 +4476,14 @@ if (-not $selectionGiven) {
         $label = "$($item.DisplayName) $($item.Version)"
         try {
             $prerequisite = Get-PrerequisiteFromId -Id $item.Id
+            if (-not $item.Needed) {
+                $servedTools = @(Get-ToolsStillServedByDotNetLine -Id $item.Id -State $state)
+                if ($servedTools.Count -gt 0) {
+                    Add-Result -Group 'Clean-up' -Name $label -Status 'WARN' -Detail "kept: installed tools still need it (see Warnings)"
+                    Add-RunWarning -Message "$label kept: installed tools still run on it ($($servedTools -join ', ')); it goes once they are updated."
+                    continue
+                }
+            }
             if ($item.Needed) {
                 $latestNow = @(Get-PrerequisiteInstalledVersion -Prerequisite $prerequisite | Where-Object { Test-SameVersion -First $_ -Second $item.LatestVersion })
                 if ($latestNow.Count -eq 0) {
