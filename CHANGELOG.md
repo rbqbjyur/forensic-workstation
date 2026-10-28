@@ -4,6 +4,32 @@ Notable changes to `Update-ForensicWorkstation.ps1`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.5.0 - 2026-10-28
+
+### Changed
+- Every source is a row of one `$Sources` table in CONFIG, with its kind and
+  that kind's settings: `EzIndex` (Zimmerman's index page), `VersionPage`
+  (a version read from a page or feed, then download URLs by build, or a
+  hand download: NirSoft and Arsenal Image Mounter), `DirectUrl`
+  (Sysinternals), `GitHubRelease` (SRUM-DUMP), `RedirectedUrl` (the Visual
+  C++ Redistributable) and `GitHubFile` (AIM's driver package). A catalogue
+  row's `Source` names a row. A vendor of a known kind is rows, not code;
+  Arsenal Image Mounter has no adapter of its own any more.
+- The Visual C++ Redistributable and AIM's driver are rows of
+  `$OtherPrerequisites` naming their source, how their installed version is
+  read (`RegistryVersion`, `DriverService`) and how they are installed
+  (`Installer`, `DriverPackage`), with every setting on the row.
+- After the update: SRUM-DUMP's two copies and Arsenal Image Mounter
+  reinstall once (their rows changed; AIM from its zip in Downloads, or,
+  if the zip is gone, a WARN asking for it as for an update, the installed
+  copy kept meanwhile), and each NirSoft tool downloads once without being
+  swapped in (its change marker gained a field for the server's ETag,
+  which nirsoft.net leaves empty). Nothing else is downloaded.
+- "Available from EZTools, not in the catalogue" names the source (was
+  "from Zimmerman").
+- A zip downloaded by hand is said as read from the Downloads folder (was
+  "Downloaded"); the run log names the address of every download.
+
 ## 0.4.0 - 2026-10-28
 
 ### Added

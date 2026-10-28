@@ -106,7 +106,7 @@ param(
 
 # ============================== CONFIG ==============================
 
-$WorkstationVersion = '0.4.0'
+$WorkstationVersion = '0.5.0'
 
 # No script-wide error suppression: every unit of work has its own try/catch.
 # Progress bars are off: Invoke-WebRequest in PowerShell 5.1 is many times
@@ -204,38 +204,22 @@ $EzRuntimesKept = @('runtimes\win-x64\*')                               # ...its
 #   DisplayName    the shortcut's name (GUI tools)
 #   Family         a Name in $Families: where it comes from
 #   Category       a name in $Categories: where it goes on the workstation
-#   Source         the adapter that checks and downloads it:
-#                    EZTools       download.ericzimmermanstools.com; the build
-#                                  on the newest .NET line on the vendor's page
-#                    NirSoft       nirsoft.net; the first build in
-#                                  $NirSoftBuilds that exists
-#                    Sysinternals  download.sysinternals.com
-#                    ArsenalRecon  the version from the vendor's downloads
-#                                  page; the zip downloaded by hand into the
-#                                  account's Downloads folder (the vendor
-#                                  ships it through MEGA)
-#                    DirectUrl     any vendor that publishes a zip at a fixed
-#                                  URL: Package is the URL; the change marker
-#                                  is the server's headers (ETag,
-#                                  Last-Modified, Content-Length)
-#                    GitHubRelease any vendor that publishes releases on
-#                                  GitHub: Package is 'owner/repository',
-#                                  AssetPattern picks the zip; the latest
-#                                  release (not draft, not pre-release) by
-#                                  its tag; the asset's SHA-256 digest from
-#                                  the API is the vendor's hash
-#   Package        the adapter's name for it: EZTools and Sysinternals the
-#                  zip's name; NirSoft the name in its PAD and zip URLs;
-#                  ArsenalRecon the downloads page. Two rows may share a zip
-#                  (Autoruns and autorunsc), each installing its own Files
+#   Source         a Name in $Sources: where it is fetched from, and how
+#                  (the source's Kind)
+#   Package        the source's name for it, what its templates' {0} is:
+#                  EzIndex and Sysinternals the zip's name; NirSoft the name
+#                  in its PAD and zip URLs; Arsenal the zip's name before
+#                  its version; GitHubRelease the 'owner/repository'. Two
+#                  rows may share a zip (Autoruns and autorunsc), each
+#                  installing its own Files
 #   Gui            the exe a shortcut opens, relative to the tool's folder,
 #                  or $null
 #   Cli            the exes run by name from a terminal; a tool with any has
 #                  its folder on the machine PATH
 #   Requires       prerequisites, as capabilities: 'DotNet:<Flavour>' means
 #                  that flavour (a $DotNetFlavours row) of the .NET line the
-#                  chosen build targets (EZTools builds name their line, e.g.
-#                  net9)
+#                  chosen build targets (EzIndex builds name their line,
+#                  net10)
 #   KeepPaths      folders inside the tool's folder kept across an update
 #                  (user data); not verified by -Verify
 #   WritablePaths  folders inside the tool's folder the running account may
@@ -263,8 +247,9 @@ $EzRuntimesKept = @('runtimes\win-x64\*')                               # ...its
 #                  must then confirm at install
 #   AssetPattern   GitHubRelease: a regular expression the release asset's
 #                  name must match (the first match is taken)
-#   RuntimeConfig  ArsenalRecon: the runtimeconfig.json in the zip that names
-#                  the build's .NET line (its zip names no line)
+#   RuntimeConfig  a VersionPage hand download: the runtimeconfig.json in
+#                  the zip that names the build's .NET line (the source
+#                  names none)
 #   ShortcutOutsideFolder  $true: the shortcuts sit directly on the Desktop
 #                  and in the Start Menu, not in the category's folder
 #                  (Timeline Explorer, used with every category's output)
@@ -317,44 +302,99 @@ $Catalogue = @(
     [pscustomobject]@{ Name = 'Autorunsc';       DisplayName = 'autorunsc';        Family = 'Sysinternals'; Category = 'System'; Source = 'Sysinternals'; Package = 'Autoruns.zip';        Gui = $null;            Cli = @('autorunsc64.exe'); Requires = @(); KeepPaths = @(); WritablePaths = @(); Files = @('autorunsc64.exe', 'Eula.txt'); EulaKeys = @('Autorunsc') }
     [pscustomobject]@{ Name = 'Disk2vhd';        DisplayName = 'Disk2vhd';         Family = 'Sysinternals'; Category = 'Acquisition'; Source = 'Sysinternals'; Package = 'Disk2vhd.zip';        Gui = 'disk2vhd64.exe'; Cli = @();                  Requires = @(); KeepPaths = @(); WritablePaths = @(); Files = @('disk2vhd64.exe', 'Disk2vhd.chm', 'Eula.txt'); EulaKeys = @('Disk2Vhd') }
     # Arsenal Image Mounter: the zip downloaded by hand; the GUI and the CLI as two tools, so only the CLI's folder is on PATH. It needs the Visual C++ Redistributable (the GUI) and its driver (both), prerequisites of their own.
-    [pscustomobject]@{ Name = 'ArsenalImageMounter'; DisplayName = 'Arsenal Image Mounter'; Family = 'Arsenal'; Category = 'Acquisition'; Source = 'ArsenalRecon'; Package = 'https://arsenalrecon.com/products/arsenal-image-mounter/downloads'; RuntimeConfig = 'ArsenalImageMounter.runtimeconfig.json'
+    [pscustomobject]@{ Name = 'ArsenalImageMounter'; DisplayName = 'Arsenal Image Mounter'; Family = 'Arsenal'; Category = 'Acquisition'; Source = 'ArsenalRecon'; Package = 'Arsenal-Image-Mounter'; RuntimeConfig = 'ArsenalImageMounter.runtimeconfig.json'
         Gui = 'ArsenalImageMounter.exe'; Cli = @(); Requires = @('DotNet:WindowsDesktop', 'VCRedist:x64', 'AimDriver'); KeepPaths = @(); WritablePaths = @(); WritableFiles = @('ArsenalImageMounter.log'); ExcludeFiles = @($ArsenalNotInstalled) + @('aim_cli.exe', 'aim_pro.exe'); KeepFiles = @($ArsenalKept) }
-    [pscustomobject]@{ Name = 'AimCli'; DisplayName = 'AIM CLI'; Family = 'Arsenal'; Category = 'Acquisition'; Source = 'ArsenalRecon'; Package = 'https://arsenalrecon.com/products/arsenal-image-mounter/downloads'; RuntimeConfig = 'aim_cli.runtimeconfig.json'
+    [pscustomobject]@{ Name = 'AimCli'; DisplayName = 'AIM CLI'; Family = 'Arsenal'; Category = 'Acquisition'; Source = 'ArsenalRecon'; Package = 'Arsenal-Image-Mounter'; RuntimeConfig = 'aim_cli.runtimeconfig.json'
         Gui = $null; Cli = @('aim_cli.exe', 'aim_pro.exe'); Requires = @('DotNet:NETCore', 'AimDriver'); KeepPaths = @(); WritablePaths = @(); ExcludeFiles = @($ArsenalNotInstalled) + @('ArsenalImageMounter.*'); KeepFiles = @($ArsenalKept) }
     # SRUM-DUMP: one exe released on GitHub, as a GUI tool and, in a folder of its own, as the command-line srum_dump: only that folder goes on PATH
-    [pscustomobject]@{ Name = 'SrumDump';    DisplayName = 'SRUM-DUMP'; Family = 'SRUM-DUMP'; Category = 'Execution'; Source = 'GitHubRelease'; Package = 'MarkBaggett/srum-dump'; AssetPattern = '^srum_dump\.exe$'; Gui = 'srum_dump.exe'; Cli = @();                Requires = @(); KeepPaths = @(); WritablePaths = @() }
-    [pscustomobject]@{ Name = 'SrumDumpCli'; DisplayName = 'srum_dump'; Family = 'SRUM-DUMP'; Category = 'Execution'; Source = 'GitHubRelease'; Package = 'MarkBaggett/srum-dump'; AssetPattern = '^srum_dump\.exe$'; Gui = $null;          Cli = @('srum_dump.exe'); Requires = @(); KeepPaths = @(); WritablePaths = @() }
+    [pscustomobject]@{ Name = 'SrumDump';    DisplayName = 'SRUM-DUMP'; Family = 'SRUM-DUMP'; Category = 'Execution'; Source = 'GitHub'; Package = 'MarkBaggett/srum-dump'; AssetPattern = '^srum_dump\.exe$'; Gui = 'srum_dump.exe'; Cli = @();                Requires = @(); KeepPaths = @(); WritablePaths = @() }
+    [pscustomobject]@{ Name = 'SrumDumpCli'; DisplayName = 'srum_dump'; Family = 'SRUM-DUMP'; Category = 'Execution'; Source = 'GitHub'; Package = 'MarkBaggett/srum-dump'; AssetPattern = '^srum_dump\.exe$'; Gui = $null;          Cli = @('srum_dump.exe'); Requires = @(); KeepPaths = @(); WritablePaths = @() }
 )
 
-# Arsenal: the newest release on the downloads page (listed newest first),
-# with the MD5 the vendor publishes for its zip (missing for some releases).
-$ArsenalReleasePattern = 'Arsenal-Image-Mounter[-_]v(\d+(?:\.\d+){1,3})\.zip\s*MD5\s*Hash\s*=\s*([0-9a-fA-F]{32})?'
-
-# --- Source adapters' settings ---
-
-# Zimmerman: the vendor's index (tools.ericzimmermanstools.com redirects to
-# it), and the net-line zips on it that are left out on purpose, so they
-# aren't reported as "not in the catalogue": iisGeolocate, TimeApp and XWFIM
-# (the vendor's "Other tools"), Hasher, bstrings, rla, EZViewer and VSCMount
-# (not wanted on the workstation).
-$EzIndexUrl = 'https://raw.githubusercontent.com/EricZimmerman/ericzimmerman.github.io/refs/heads/master/docs/index.md'
-# Its .NET builds are linked as /net<line>/<zip> or, since 2026-10-24, as
-# /net/<zip> for the vendor's current line, whose number the page's table
-# header gives ("Version (.net 4 | 10)"); links at the root are the .NET
-# Framework builds, never used.
-$EzDownloadPattern = 'https://download\.ericzimmermanstools\.com/net(\d*)/([A-Za-z0-9_.-]+\.zip)'
-$EzCurrentLinePattern = 'Version \(\.net 4 (?:&vert;|\|) (\d+)\)'
-$EzOutOfScope = @('iisGeolocate.zip', 'TimeApp.zip', 'XWFIM.zip', 'hasher.zip', 'bstrings.zip', 'rla.zip', 'EZViewer.zip', 'VSCMount.zip')
-
-# NirSoft: version from the PAD file; builds in order of preference.
-$NirSoftPadUrl = 'https://www.nirsoft.net/pad/{0}.xml'
-$NirSoftZipUrl = 'https://www.nirsoft.net/utils/{0}{1}.zip'
-$NirSoftBuilds = @(
-    [pscustomobject]@{ Build = 'x64'; Suffix = '-x64' }
-    [pscustomobject]@{ Build = 'x86'; Suffix = '' }
+# --- Sources ---
+# Where tools and prerequisites are fetched from: one row per vendor source,
+# named by a catalogue row's or a prerequisite row's Source. Kind picks the
+# adapter (Get-SourceRemote); the other fields are that kind's settings. In
+# a URL or file-name template, {0} is the row's Package, {1} the version the
+# source states and {2} the build's suffix (VersionPage); a template with no
+# placeholder is used as it is.
+#   Name     what a row's Source names
+#   Kind     EzIndex        one index page listing every zip with its .NET
+#                           line: IndexUrl; DownloadPattern (group 1 the
+#                           line's number, empty for the vendor's current
+#                           line; group 2 the zip's name); CurrentLinePattern
+#                           (group 1 the current line's number, from the
+#                           page's header); OutOfScope, the zips left out on
+#                           purpose, so they aren't reported as "available,
+#                           not in the catalogue". Package is the zip's name.
+#                           Builds name their line (net10)
+#            VersionPage    one text per tool, a page or feed at PageUrl, the
+#                           version read by VersionPattern (named group
+#                           "version"; "hash", with HashAlgorithm, where the
+#                           vendor publishes one); then either Downloads, URL
+#                           templates tried in order (Build, Suffix, Url),
+#                           the first that exists taken, or ManualDownload =
+#                           $true: the file (FileName) is expected in the
+#                           account's Downloads folder, PageUrl opened in the
+#                           browser until it is there, and the build's .NET
+#                           line read from the row's RuntimeConfig
+#            DirectUrl      a file at a fixed URL: Url (a template; '{0}'
+#                           where Package is the URL itself); the server's
+#                           headers are the change marker
+#            GitHubRelease  the latest release (not draft, not pre-release)
+#                           of the repository Package names
+#                           ('owner/repository'), its asset by the row's
+#                           AssetPattern; the asset's SHA-256 digest from the
+#                           API is the vendor's hash
+#            RedirectedUrl  a permanent link (Url, a template) that redirects
+#                           to the current file; HashInUrlPattern (group 1)
+#                           reads the vendor's hash (HashAlgorithm) from the
+#                           final URL; the marker is that URL and the server's
+#                           headers; the version is the file's own
+#            GitHubFile     a file in the repository Package names, at the
+#                           row's RepositoryPath on its Branch, pinned to the
+#                           last commit to it; VersionPattern (group 1) reads
+#                           the version from the commit's message; the file's
+#                           git blob hash is the vendor's hash
+$Sources = @(
+    # Zimmerman: the vendor's index (tools.ericzimmermanstools.com redirects
+    # to it). Its .NET builds are linked as /net<line>/<zip> or, since
+    # 2026-10-24, as /net/<zip> for the vendor's current line, whose number
+    # the page's table header gives ("Version (.net 4 | 10)"); links at the
+    # root are the .NET Framework builds, never used. Left out on purpose:
+    # iisGeolocate, TimeApp and XWFIM (the vendor's "Other tools"), Hasher,
+    # bstrings, rla, EZViewer and VSCMount (not wanted on the workstation).
+    [pscustomobject]@{ Name = 'EZTools'; Kind = 'EzIndex'
+        IndexUrl = 'https://raw.githubusercontent.com/EricZimmerman/ericzimmerman.github.io/refs/heads/master/docs/index.md'
+        DownloadPattern = 'https://download\.ericzimmermanstools\.com/net(\d*)/([A-Za-z0-9_.-]+\.zip)'
+        CurrentLinePattern = 'Version \(\.net 4 (?:&vert;|\|) (\d+)\)'
+        OutOfScope = @('iisGeolocate.zip', 'TimeApp.zip', 'XWFIM.zip', 'hasher.zip', 'bstrings.zip', 'rla.zip', 'EZViewer.zip', 'VSCMount.zip') }
+    # NirSoft: the version from the tool's PAD file; the x64 zip where there
+    # is one, else the x86 one.
+    [pscustomobject]@{ Name = 'NirSoft'; Kind = 'VersionPage'
+        PageUrl = 'https://www.nirsoft.net/pad/{0}.xml'; VersionPattern = '<Program_Version>(?<version>[^<]+)</Program_Version>'; HashAlgorithm = ''
+        FileName = '{0}{2}.zip'; ManualDownload = $false
+        Downloads = @(
+            [pscustomobject]@{ Build = 'x64'; Suffix = '-x64'; Url = 'https://www.nirsoft.net/utils/{0}{2}.zip' }
+            [pscustomobject]@{ Build = 'x86'; Suffix = '';     Url = 'https://www.nirsoft.net/utils/{0}{2}.zip' }
+        ) }
+    [pscustomobject]@{ Name = 'Sysinternals'; Kind = 'DirectUrl'; Url = 'https://download.sysinternals.com/files/{0}' }
+    [pscustomobject]@{ Name = 'GitHub'; Kind = 'GitHubRelease' }
+    # Arsenal: the newest release on the downloads page (listed newest
+    # first) with the MD5 the vendor publishes for its zip (missing for some
+    # releases); the zip itself is downloaded by hand (the vendor ships it
+    # through MEGA).
+    [pscustomobject]@{ Name = 'ArsenalRecon'; Kind = 'VersionPage'
+        PageUrl = 'https://arsenalrecon.com/products/arsenal-image-mounter/downloads'
+        VersionPattern = 'Arsenal-Image-Mounter[-_]v(?<version>\d+(?:\.\d+){1,3})\.zip\s*MD5\s*Hash\s*=\s*(?<hash>[0-9a-fA-F]{32})?'; HashAlgorithm = 'MD5'
+        FileName = '{0}-v{1}.zip'; ManualDownload = $true; Downloads = @() }
+    # Microsoft's permanent download links redirect to a URL holding the
+    # file's SHA-256.
+    [pscustomobject]@{ Name = 'MicrosoftDownload'; Kind = 'RedirectedUrl'; Url = '{0}'; HashInUrlPattern = '/([0-9A-Fa-f]{64})/[^/]+$'; HashAlgorithm = 'SHA256' }
+    # Arsenal's driver package in its repository: the commit's message names
+    # the driver version ("Driver/API 1.2.30.96").
+    [pscustomobject]@{ Name = 'ArsenalDriverSetup'; Kind = 'GitHubFile'; VersionPattern = 'Driver/API (\d+(?:\.\d+){3})' }
 )
-
-$SysinternalsZipUrl = 'https://download.sysinternals.com/files/{0}'
 
 # --- Ancillary content ---
 # Content a tool syncs from GitHub with its own --sync, checked every run.
@@ -399,46 +439,59 @@ $DotNetUninstallArguments = @('/uninstall', '/quiet', '/norestart')
 # never removed by this script (RemovalNote says why, and how by hand).
 # Fields:
 #   Capability, DisplayName
-#   Source          VisualCppRedist: Microsoft's permanent link, which
-#                     redirects to a URL holding the file's SHA-256
-#                   ArsenalDriver: Arsenal's driver package on GitHub; its
-#                     version from the last commit's message, its git blob
-#                     hash from the API, the download pinned to that commit
-#   Url             VisualCppRedist: the permanent link
-#   Repository, RepositoryPath, Branch   ArsenalDriver: where the package is
-#   ExpectedSigner  the installer's signer (ArsenalDriver: aim_ll.exe's)
-#   DriverSigner    ArsenalDriver: the signer of the driver's catalogue, on
-#                     whose strength Windows installs and loads the driver
-#   InstallArguments  VisualCppRedist: for its installer
+#   Source          a Name in $Sources, with Package as a catalogue row has
+#                   it; a GitHubFile source's row adds RepositoryPath and
+#                   Branch
+#   ExpectedSigner  the download's signer, or the signer of the installer
+#                   inside a package (the package itself, a .7z, unsigned)
+#   Detect          how the version installed is read:
+#                   RegistryVersion  the first of DetectKeys whose value
+#                                    DetectInstalledName is 1 holds it in
+#                                    the value DetectVersionName
+#                   DriverService    a Plug and Play device on the service
+#                                    DetectService is present, and
+#                                    System32\drivers\<service>.sys carries
+#                                    the version
+#   Install         how it is installed, when the version offered is newer
+#                   than the one installed:
+#                   Installer      the download run with InstallArguments,
+#                                  SuccessExitCodes its success codes (3010:
+#                                  a restart is needed, a WARN); the version
+#                                  is the file's own
+#                   DriverPackage  the download, an archive, extracted with
+#                                  Windows' own tar.exe; in it,
+#                                  PackageInstaller checked against
+#                                  ExpectedSigner and PackageCatalogue against
+#                                  DriverSigner, then PackageInf and every
+#                                  file in PackageDriverFolder matching
+#                                  PackageCataloguedPatterns verified as the
+#                                  catalogue's members, as Windows verifies
+#                                  them (Test-CatalogueMember); the installer
+#                                  run with PackageInstallArguments ({0} the
+#                                  package's folder); the version installed
+#                                  checked afterwards
 #   RemovalNote     why the script never removes it
+# Arsenal's driver files' own embedded signatures are Arsenal's, with
+# Microsoft's nested inside (which Get-AuthenticodeSignature never reads):
+# what Windows goes by is the package's catalogue, signed by Microsoft,
+# which names each file's hash. So the catalogue's signer is checked, and
+# the INF and every binary in the driver folder are verified as members of
+# it.
 $OtherPrerequisites = @(
-    [pscustomobject]@{ Capability = 'VCRedist:x64'; DisplayName = 'Visual C++ Redistributable (x64)'; Source = 'VisualCppRedist'
-        Url = 'https://aka.ms/vs/17/release/vc_redist.x64.exe'; ExpectedSigner = 'Microsoft Corporation'; InstallArguments = @('/install', '/quiet', '/norestart')
+    [pscustomobject]@{ Capability = 'VCRedist:x64'; DisplayName = 'Visual C++ Redistributable (x64)'
+        Source = 'MicrosoftDownload'; Package = 'https://aka.ms/vs/17/release/vc_redist.x64.exe'; ExpectedSigner = 'Microsoft Corporation'
+        Detect = 'RegistryVersion'; DetectInstalledName = 'Installed'; DetectVersionName = 'Version'
+        DetectKeys = @('HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x64')
+        Install = 'Installer'; InstallArguments = @('/install', '/quiet', '/norestart'); SuccessExitCodes = @(0, 3010, 1638)     # 1638: a newer version is already installed
         RemovalNote = 'other programs share it' }
-    [pscustomobject]@{ Capability = 'AimDriver'; DisplayName = 'Arsenal Image Mounter driver'; Source = 'ArsenalDriver'
-        Repository = 'ArsenalRecon/Arsenal-Image-Mounter'; RepositoryPath = 'DriverSetup/DriverSetup.7z'; Branch = 'master'
+    [pscustomobject]@{ Capability = 'AimDriver'; DisplayName = 'Arsenal Image Mounter driver'
+        Source = 'ArsenalDriverSetup'; Package = 'ArsenalRecon/Arsenal-Image-Mounter'; RepositoryPath = 'DriverSetup/DriverSetup.7z'; Branch = 'master'
         ExpectedSigner = 'Arsenal Consulting, Inc.'; DriverSigner = 'Microsoft Windows Hardware Compatibility Publisher'
+        Detect = 'DriverService'; DetectService = 'phdskmnt'
+        Install = 'DriverPackage'; PackageInstaller = 'cli\x64\aim_ll.exe'; PackageInstallArguments = @('--install', '{0}')
+        PackageCatalogue = 'Win10\phdskmnt.cat'; PackageInf = 'Win10\phdskmnt.inf'; PackageDriverFolder = 'Win10\x64'; PackageCataloguedPatterns = @('*.sys', '*.exe', '*.dll')
         RemovalNote = "removing it needs a restart: run aim_ll.exe --uninstall from Arsenal's DriverSetup package, elevated, then restart" }
 )
-# The Visual C++ installer's success codes: 3010 a restart is needed, 1638
-# a newer version is already installed.
-$VcRedistSuccessExitCodes = @(0, 3010, 1638)
-$VcRedistRegistryKeys = @('HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x64')
-# Arsenal's driver: the version in its package's commit message, the
-# driver's service, and the files inside the package the script uses. The
-# driver files' own embedded signatures are Arsenal's, with Microsoft's
-# nested inside (which Get-AuthenticodeSignature never reads): what Windows
-# goes by is the package's catalogue, signed by Microsoft, which names each
-# file's hash. So the catalogue's signer is checked, and the INF and every
-# binary in the driver folder are verified as members of it, as Windows
-# verifies them (Test-CatalogueMember).
-$ArsenalDriverVersionPattern = 'Driver/API (\d+(?:\.\d+){3})'
-$ArsenalDriverService = 'phdskmnt'
-$ArsenalDriverInstaller = 'cli\x64\aim_ll.exe'
-$ArsenalDriverCatalogue = 'Win10\phdskmnt.cat'
-$ArsenalDriverInf = 'Win10\phdskmnt.inf'
-$ArsenalDriverFolder = 'Win10\x64'
-$ArsenalDriverCataloguedPatterns = @('*.sys', '*.exe', '*.dll')    # every such file in the folder must be a member
 # A catalogue's members are hashed with SHA-256 (older catalogues SHA-1):
 # tried in this order.
 $CatalogueHashAlgorithms = @('SHA256', 'SHA1')
@@ -1422,24 +1475,53 @@ function Get-HeaderMarker {
     return "$($Head.ETag)|$($Head.LastModified)|$($Head.ContentLength)"
 }
 
-# The Zimmerman index: for each zip on the vendor's page, the newest .NET
-# line it is offered for and its URL. A /net/ link is the line the page's
-# table header names; a page with such links and no such header can't be
-# read (the line would be a guess). Read once per run ($script:ezIndex).
-function Get-EzToolIndex {
-    if ($script:ezIndex) { return $script:ezIndex }
-    $text = Get-HttpText -Uri $script:EzIndexUrl
+# A $Sources row by name, or throws (an adapted copy's slip).
+function Get-SourceRow {
+    param([string]$Name)
+    $row = @($script:Sources | Where-Object { $_.Name -eq $Name }) | Select-Object -First 1
+    if (-not $row) { throw "unknown source '$Name'" }
+    return $row
+}
+
+# What a source offers now for a row (a catalogue row, or a prerequisite
+# row), by the kind of its $Sources row: one line per kind, so every
+# adapter's call site is in plain sight. The build is the row's where the
+# source names none (x64 by default).
+function Get-SourceRemote {
+    param($Row)
+    $source = Get-SourceRow -Name $Row.Source
+    $build = 'x64'
+    if ($Row.Build) { $build = $Row.Build }
+    switch ($source.Kind) {
+        'EzIndex'       { return (Get-EzIndexRemote -Source $source -Row $Row) }
+        'VersionPage'   { return (Get-VersionPageRemote -Source $source -Row $Row -Build $build) }
+        'DirectUrl'     { return (Get-DirectUrlRemote -Source $source -Row $Row -Build $build) }
+        'GitHubRelease' { return (Get-GitHubReleaseRemote -Repository $Row.Package -AssetPattern $Row.AssetPattern -Build $build) }
+        'RedirectedUrl' { return (Get-RedirectedUrlRemote -Source $source -Row $Row -Build $build) }
+        'GitHubFile'    { return (Get-GitHubFileRemote -Source $source -Row $Row -Build $build) }
+    }
+    throw "unknown source kind '$($source.Kind)' ($($source.Name))"
+}
+
+# An EzIndex source's page: for each zip on it, the newest .NET line it is
+# offered for and its URL. A /net/ link is the line the page's header
+# names; a page with such links and no such header can't be read (the line
+# would be a guess). Read once per run per source ($script:ezIndexBySource).
+function Get-EzIndex {
+    param($Source)
+    if ($script:ezIndexBySource.ContainsKey($Source.Name)) { return $script:ezIndexBySource[$Source.Name] }
+    $text = Get-HttpText -Uri $Source.IndexUrl
     $currentLine = 0
-    $headerMatch = [regex]::Match($text, $script:EzCurrentLinePattern, 'IgnoreCase')
+    $headerMatch = [regex]::Match($text, $Source.CurrentLinePattern, 'IgnoreCase')
     if ($headerMatch.Success) { $currentLine = [int]$headerMatch.Groups[1].Value }
     $index = @{}
-    foreach ($match in [regex]::Matches($text, $script:EzDownloadPattern, 'IgnoreCase')) {
+    foreach ($match in [regex]::Matches($text, $Source.DownloadPattern, 'IgnoreCase')) {
         if ($match.Groups[1].Value) {
             $line = [int]$match.Groups[1].Value
         } elseif ($currentLine -gt 0) {
             $line = $currentLine
         } else {
-            throw "$($script:EzIndexUrl) links /net/ builds but doesn't say which .NET line they are: the page's format may have changed"
+            throw "$($Source.IndexUrl) links /net/ builds but doesn't say which .NET line they are: the page's format may have changed"
         }
         $zipName = $match.Groups[2].Value
         $key = $zipName.ToLowerInvariant()
@@ -1447,62 +1529,85 @@ function Get-EzToolIndex {
             $index[$key] = [pscustomobject]@{ Line = $line; Url = $match.Value; ZipName = $zipName }
         }
     }
-    if ($index.Count -eq 0) { throw "no tool downloads found on $($script:EzIndexUrl): the page's format may have changed" }
-    $script:ezIndex = $index
+    if ($index.Count -eq 0) { throw "no tool downloads found on $($Source.IndexUrl): the page's format may have changed" }
+    $script:ezIndexBySource[$Source.Name] = $index
     return $index
 }
 
-function Get-EzToolRemote {
-    param($CatalogueTool)
-    $index = Get-EzToolIndex
-    $entry = $index[$CatalogueTool.Package.ToLowerInvariant()]
+# The adapter for a tool on an EzIndex source's page: its zip's build on
+# the newest .NET line offered.
+function Get-EzIndexRemote {
+    param($Source, $Row)
+    $index = Get-EzIndex -Source $Source
+    $entry = $index[$Row.Package.ToLowerInvariant()]
     if (-not $entry) { return (New-Remote -Available $false -Detail "not on the vendor's page") }
     $head = Invoke-HttpHead -Uri $entry.Url
     if (-not $head) { return (New-Remote -Available $false -Detail "listed but not downloadable: $($entry.Url)") }
     return (New-Remote -Available $true -Build "net$($entry.Line)" -Marker ("net$($entry.Line)|" + (Get-HeaderMarker -Head $head)) -Url $entry.Url -FileName $entry.ZipName)
 }
 
-# Zips on the Zimmerman page in a .NET line that the catalogue doesn't list:
-# reported as "available, not in the catalogue", never installed.
-function Get-EzToolNotInCatalogue {
-    $index = Get-EzToolIndex
-    $known = @($script:Catalogue | Where-Object { $_.Source -eq 'EZTools' } | ForEach-Object { $_.Package.ToLowerInvariant() })
-    $outOfScope = @($script:EzOutOfScope | ForEach-Object { $_.ToLowerInvariant() })
+# Zips on an EzIndex source's page in a .NET line that no catalogue row
+# lists: reported as "available, not in the catalogue", never installed.
+function Get-EzIndexNotInCatalogue {
+    param($Source)
+    $index = Get-EzIndex -Source $Source
+    $known = @($script:Catalogue | Where-Object { $_.Source -eq $Source.Name } | ForEach-Object { $_.Package.ToLowerInvariant() })
+    $outOfScope = @($Source.OutOfScope | ForEach-Object { $_.ToLowerInvariant() })
     $unknown = foreach ($key in $index.Keys) {
         if ($known -notcontains $key -and $outOfScope -notcontains $key) { $index[$key].ZipName }
     }
     return @($unknown | Sort-Object)
 }
 
-function Get-NirSoftRemote {
-    param($CatalogueTool)
-    $pad = Get-HttpText -Uri ($script:NirSoftPadUrl -f $CatalogueTool.Package)
-    $versionMatch = [regex]::Match($pad, '<Program_Version>([^<]+)</Program_Version>')
-    if (-not $versionMatch.Success) { throw "no version in the PAD file for $($CatalogueTool.Package)" }
-    $version = $versionMatch.Groups[1].Value.Trim()
-    foreach ($build in $script:NirSoftBuilds) {
-        $url = $script:NirSoftZipUrl -f $CatalogueTool.Package, $build.Suffix
-        $head = Invoke-HttpHead -Uri $url
-        if ($head) {
-            $marker = "$version|$($build.Build)|$($head.LastModified)|$($head.ContentLength)"
-            return (New-Remote -Available $true -Version $version -Build $build.Build -Marker $marker -Url $url -FileName "$($CatalogueTool.Package)$($build.Suffix).zip")
+# The adapter for a vendor that states each tool's version in a page or
+# feed: the text at the source's PageUrl, the version (and the vendor's
+# hash, where it publishes one) read by its VersionPattern, then the first
+# of its Downloads that exists; or, for a hand download, the file in the
+# account's Downloads folder: until it is there, the remote's LocalFile is
+# '' and its Detail says what to download and where.
+function Get-VersionPageRemote {
+    param($Source, $Row, [string]$Build)
+    $pageUrl = $Source.PageUrl -f $Row.Package
+    $text = Get-HttpText -Uri $pageUrl
+    $match = [regex]::Match($text, $Source.VersionPattern)
+    if (-not $match.Success -or -not $match.Groups['version'].Success) { throw "no version found on ${pageUrl}: the page's format may have changed" }
+    $version = $match.Groups['version'].Value.Trim()
+    $vendorHash = ''
+    $vendorHashAlgorithm = ''
+    if ($match.Groups['hash'].Success -and $match.Groups['hash'].Value) { $vendorHash = $match.Groups['hash'].Value.ToLowerInvariant(); $vendorHashAlgorithm = $Source.HashAlgorithm }
+    if ($Source.ManualDownload) {
+        $fileName = $Source.FileName -f $Row.Package, $version, ''
+        $downloadsFolder = Get-DownloadsFolder
+        $localFile = Join-Path $downloadsFolder $fileName
+        if (-not [System.IO.File]::Exists($localFile)) {
+            return (New-Remote -Available $true -Version $version -Marker $version -Url $pageUrl -FileName $fileName -VendorHashAlgorithm $vendorHashAlgorithm -VendorHash $vendorHash `
+                    -Detail "download $fileName from $pageUrl into $(Format-Unbreakable -Text $downloadsFolder), then run again" -NeedsManualDownload $true)
         }
+        $localBuild = $Build
+        if ($Row.RuntimeConfig) {
+            $localBuild = Get-ZipDotNetBuild -ZipPath $localFile -RuntimeConfigName $Row.RuntimeConfig
+            if (-not $localBuild) { throw "$fileName names no .NET line in its $($Row.RuntimeConfig)" }
+        }
+        return (New-Remote -Available $true -Version $version -Build $localBuild -Marker $version -Url $pageUrl -FileName $fileName -VendorHashAlgorithm $vendorHashAlgorithm -VendorHash $vendorHash -LocalFile $localFile)
     }
-    return (New-Remote -Available $false -Detail 'no build found (x64 or x86)')
+    foreach ($download in $Source.Downloads) {
+        $url = $download.Url -f $Row.Package, $version, $download.Suffix
+        $head = Invoke-HttpHead -Uri $url
+        if (-not $head) { continue }
+        return (New-Remote -Available $true -Version $version -Build $download.Build -Marker "$version|$($download.Build)|$(Get-HeaderMarker -Head $head)" -Url $url -FileName ($Source.FileName -f $Row.Package, $version, $download.Suffix) `
+                -VendorHashAlgorithm $vendorHashAlgorithm -VendorHash $vendorHash)
+    }
+    return (New-Remote -Available $false -Detail "no build found ($(@($Source.Downloads | ForEach-Object { $_.Build }) -join ' or '))")
 }
 
-# The generic adapter for a file at a fixed URL: the server's headers are
-# the change marker; the build is the row's (default x64).
+# The adapter for a file at a fixed URL (the source's Url template and the
+# row's Package): the server's headers are the change marker.
 function Get-DirectUrlRemote {
-    param([string]$Url, [string]$FileName, [string]$Build = 'x64')
-    $head = Invoke-HttpHead -Uri $Url
-    if (-not $head) { return (New-Remote -Available $false -Detail "not found: $Url") }
-    return (New-Remote -Available $true -Build $Build -Marker (Get-HeaderMarker -Head $head) -Url $Url -FileName $FileName)
-}
-
-function Get-SysinternalsRemote {
-    param($CatalogueTool)
-    return (Get-DirectUrlRemote -Url ($script:SysinternalsZipUrl -f $CatalogueTool.Package) -FileName $CatalogueTool.Package -Build 'x64')
+    param($Source, $Row, [string]$Build)
+    $url = $Source.Url -f $Row.Package
+    $head = Invoke-HttpHead -Uri $url
+    if (-not $head) { return (New-Remote -Available $false -Detail "not found: $url") }
+    return (New-Remote -Available $true -Build $Build -Marker (Get-HeaderMarker -Head $head) -Url $url -FileName ([System.IO.Path]::GetFileName(([uri]$url).AbsolutePath)))
 }
 
 # The latest release of a GitHub repository (not a draft, not a
@@ -1578,48 +1683,45 @@ function Get-ZipDotNetBuild {
     return ''
 }
 
-# Arsenal Image Mounter: the newest version on the vendor's downloads page and
-# the MD5 it publishes for that release's zip (where it gives one). The zip is
-# downloaded by hand (the vendor ships it through MEGA) into the account's
-# Downloads folder under the vendor's name; until it is there, the remote's
-# LocalFile is '' and its Detail says what to download and where.
-function Get-ArsenalRemote {
-    param($CatalogueTool)
-    $page = Get-HttpText -Uri $CatalogueTool.Package
-    $match = [regex]::Match($page, $script:ArsenalReleasePattern)
-    if (-not $match.Success) { throw "no release found on $($CatalogueTool.Package): the page's format may have changed" }
-    $version = $match.Groups[1].Value
-    $md5 = $match.Groups[2].Value.ToLowerInvariant()
-    $algorithm = ''
-    if ($md5) { $algorithm = 'MD5' }
-    $fileName = "Arsenal-Image-Mounter-v$version.zip"
-    $zipPath = Join-Path (Get-DownloadsFolder) $fileName
-    $localFile = ''
-    $build = ''
-    $detail = "download $fileName from $($CatalogueTool.Package) into $(Format-Unbreakable -Text (Get-DownloadsFolder)), then run again"
-    if ([System.IO.File]::Exists($zipPath)) {
-        $localFile = $zipPath
-        $build = Get-ZipDotNetBuild -ZipPath $zipPath -RuntimeConfigName $CatalogueTool.RuntimeConfig
-        if (-not $build) { throw "$fileName names no .NET line in its $($CatalogueTool.RuntimeConfig)" }
-        $detail = ''
+# The adapter for a permanent link that redirects to the current file
+# (Microsoft's aka.ms links): the final URL, which may carry the file's
+# hash, and its headers are the marker; the version is read from the file
+# once it is downloaded.
+function Get-RedirectedUrlRemote {
+    param($Source, $Row, [string]$Build)
+    $url = $Source.Url -f $Row.Package
+    $response = Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -TimeoutSec $script:HttpTimeoutSeconds -ErrorAction Stop
+    $finalUrl = [string]$response.BaseResponse.ResponseUri.AbsoluteUri
+    $vendorHash = ''
+    $vendorHashAlgorithm = ''
+    if ($Source.HashInUrlPattern) {
+        $hashMatch = [regex]::Match($finalUrl, $Source.HashInUrlPattern)
+        if ($hashMatch.Success) { $vendorHash = $hashMatch.Groups[1].Value.ToLowerInvariant(); $vendorHashAlgorithm = $Source.HashAlgorithm }
     }
-    return (New-Remote -Available $true -Version $version -Build $build -Marker $version -Url $CatalogueTool.Package -FileName $fileName `
-            -VendorHashAlgorithm $algorithm -VendorHash $md5 -Detail $detail -LocalFile $localFile -NeedsManualDownload (-not $localFile))
+    $marker = "$finalUrl|$(Get-HeaderValue -Headers $response.Headers -Name 'ETag')|$(Get-HeaderValue -Headers $response.Headers -Name 'Content-Length')"
+    return (New-Remote -Available $true -Build $Build -Marker $marker -Url $finalUrl -FileName ([System.IO.Path]::GetFileName(([uri]$finalUrl).AbsolutePath)) `
+            -VendorHashAlgorithm $vendorHashAlgorithm -VendorHash $vendorHash)
 }
 
-function Get-ToolRemote {
-    param($CatalogueTool)
-    $build = 'x64'
-    if ($CatalogueTool.Build) { $build = $CatalogueTool.Build }
-    switch ($CatalogueTool.Source) {
-        'EZTools'       { return (Get-EzToolRemote -CatalogueTool $CatalogueTool) }
-        'NirSoft'       { return (Get-NirSoftRemote -CatalogueTool $CatalogueTool) }
-        'Sysinternals'  { return (Get-SysinternalsRemote -CatalogueTool $CatalogueTool) }
-        'ArsenalRecon'  { return (Get-ArsenalRemote -CatalogueTool $CatalogueTool) }
-        'DirectUrl'     { return (Get-DirectUrlRemote -Url $CatalogueTool.Package -FileName ([System.IO.Path]::GetFileName(([uri]$CatalogueTool.Package).AbsolutePath)) -Build $build) }
-        'GitHubRelease' { return (Get-GitHubReleaseRemote -Repository $CatalogueTool.Package -AssetPattern $CatalogueTool.AssetPattern -Build $build) }
+# The adapter for a file in a GitHub repository: the last commit to it on
+# the row's branch (its message names the version, by the source's
+# pattern), the download pinned to that commit, and the git blob hash
+# GitHub gives for the file at that commit.
+function Get-GitHubFileRemote {
+    param($Source, $Row, [string]$Build)
+    $commits = @(Get-GitHubJson -Path "/repos/$($Row.Package)/commits?path=$($Row.RepositoryPath)&sha=$($Row.Branch)&per_page=1")
+    if ($commits.Count -eq 0 -or -not $commits[0].sha) { return (New-Remote -Available $false -Detail "no commit found for $($Row.RepositoryPath)") }
+    $commit = $commits[0]
+    $version = ''
+    if ($Source.VersionPattern) {
+        $versionMatch = [regex]::Match([string]$commit.commit.message, $Source.VersionPattern)
+        if (-not $versionMatch.Success) { throw "the last commit to $($Row.RepositoryPath) ($($commit.sha.Substring(0, 12))) names no version" }
+        $version = $versionMatch.Groups[1].Value
     }
-    throw "unknown source '$($CatalogueTool.Source)' for $($CatalogueTool.Name)"
+    $content = Get-GitHubJson -Path "/repos/$($Row.Package)/contents/$($Row.RepositoryPath)?ref=$($commit.sha)"
+    $url = "https://raw.githubusercontent.com/$($Row.Package)/$($commit.sha)/$($Row.RepositoryPath)"
+    return (New-Remote -Available $true -Version $version -Build $Build -Marker $commit.sha -Url $url -FileName ([System.IO.Path]::GetFileName($Row.RepositoryPath)) `
+            -VendorHashAlgorithm 'GitBlobSHA1' -VendorHash ([string]$content.sha).ToLowerInvariant())
 }
 
 # Microsoft's index of .NET lines, read once per run.
@@ -1749,41 +1851,39 @@ function Get-ToolsStillServedByDotNetLine {
 
 # A prerequisite from its id: a .NET line ('DotNet:WindowsDesktop:10') or
 # an $OtherPrerequisites capability ('VCRedist:x64'). Id, Kind ('DotNet' or
-# the row's Source), DisplayName, Row, Major (the .NET major; 0 otherwise).
+# 'Other'), Detect and Install (the row's kinds; 'DotNet' for a .NET line),
+# DisplayName, Row, Major (the .NET major; 0 otherwise).
 function Get-PrerequisiteFromId {
     param([string]$Id)
     $parts = $Id -split ':'
     if ($parts[0] -eq 'DotNet') {
         $flavour = @($script:DotNetFlavours | Where-Object { $_.Flavour -eq $parts[1] }) | Select-Object -First 1
         if (-not $flavour) { throw "unknown prerequisite '$Id'" }
-        return [pscustomobject]@{ Id = $Id; Kind = 'DotNet'; DisplayName = "$($flavour.DisplayName) $($parts[2])"; Row = $flavour; Major = [int]$parts[2] }
+        return [pscustomobject]@{ Id = $Id; Kind = 'DotNet'; Detect = 'DotNet'; Install = 'DotNet'; DisplayName = "$($flavour.DisplayName) $($parts[2])"; Row = $flavour; Major = [int]$parts[2] }
     }
     $row = @($script:OtherPrerequisites | Where-Object { $_.Capability -eq $Id }) | Select-Object -First 1
     if (-not $row) { throw "unknown prerequisite '$Id'" }
-    return [pscustomobject]@{ Id = $Id; Kind = $row.Source; DisplayName = $row.DisplayName; Row = $row; Major = 0 }
+    return [pscustomobject]@{ Id = $Id; Kind = 'Other'; Detect = $row.Detect; Install = $row.Install; DisplayName = $row.DisplayName; Row = $row; Major = 0 }
 }
 
-# What a prerequisite offers now.
+# What a prerequisite offers now: a .NET line's latest patch from
+# Microsoft's metadata; any other from its $Sources row.
 function Get-PrerequisiteRemote {
     param($Prerequisite)
-    switch ($Prerequisite.Kind) {
-        'DotNet'          { return (Get-DotNetLineRemote -FlavourRow $Prerequisite.Row -Major $Prerequisite.Major) }
-        'VisualCppRedist' { return (Get-VcRedistRemote -Row $Prerequisite.Row) }
-        'ArsenalDriver'   { return (Get-ArsenalDriverRemote -Row $Prerequisite.Row) }
-    }
-    throw "unknown prerequisite kind '$($Prerequisite.Kind)'"
+    if ($Prerequisite.Kind -eq 'DotNet') { return (Get-DotNetLineRemote -FlavourRow $Prerequisite.Row -Major $Prerequisite.Major) }
+    return (Get-SourceRemote -Row $Prerequisite.Row)
 }
 
 # The versions of a prerequisite installed on this machine, whoever installed
-# them (one at most for those updated in place).
+# them (one at most for those updated in place), by the row's Detect kind.
 function Get-PrerequisiteInstalledVersion {
     param($Prerequisite)
-    switch ($Prerequisite.Kind) {
+    switch ($Prerequisite.Detect) {
         'DotNet'          { return @(Get-InstalledDotNetVersion -SharedFramework $Prerequisite.Row.SharedFramework) }
-        'VisualCppRedist' { return @(Get-InstalledVcRedistVersion) }
-        'ArsenalDriver'   { return @(Get-InstalledArsenalDriverVersion) }
+        'RegistryVersion' { return @(Get-RegistryVersionInstalled -Row $Prerequisite.Row) }
+        'DriverService'   { return @(Get-DriverServiceVersionInstalled -Row $Prerequisite.Row) }
     }
-    throw "unknown prerequisite kind '$($Prerequisite.Kind)'"
+    throw "unknown detection kind '$($Prerequisite.Detect)' ($($Prerequisite.Id))"
 }
 
 # Whether a prerequisite installed is the one offered: a .NET line has that
@@ -1800,28 +1900,14 @@ function Test-PrerequisiteCurrent {
     return ($Installed.Count -gt 0 -and $RecordedMarker -and $RecordedMarker -eq $Remote.Marker)
 }
 
-# The Visual C++ Redistributable: Microsoft's permanent link redirects to the
-# current file, whose URL holds its SHA-256. The marker is that URL and its
-# headers; the version is read from the file once it is downloaded.
-function Get-VcRedistRemote {
+# A prerequisite's installed version from the registry: the first of the
+# row's DetectKeys whose "installed" value is 1 holds it (Visual C++).
+function Get-RegistryVersionInstalled {
     param($Row)
-    $response = Invoke-WebRequest -Uri $Row.Url -Method Head -UseBasicParsing -TimeoutSec $script:HttpTimeoutSeconds -ErrorAction Stop
-    $finalUrl = [string]$response.BaseResponse.ResponseUri.AbsoluteUri
-    $hashMatch = [regex]::Match($finalUrl, '/([0-9A-Fa-f]{64})/[^/]+$')
-    $vendorHash = ''
-    $vendorHashAlgorithm = ''
-    if ($hashMatch.Success) { $vendorHash = $hashMatch.Groups[1].Value.ToLowerInvariant(); $vendorHashAlgorithm = 'SHA256' }
-    $marker = "$finalUrl|$(Get-HeaderValue -Headers $response.Headers -Name 'ETag')|$(Get-HeaderValue -Headers $response.Headers -Name 'Content-Length')"
-    return (New-Remote -Available $true -Build 'x64' -Marker $marker -Url $finalUrl -FileName ([System.IO.Path]::GetFileName(([uri]$finalUrl).AbsolutePath)) `
-            -VendorHashAlgorithm $vendorHashAlgorithm -VendorHash $vendorHash)
-}
-
-# The Visual C++ Redistributable (x64) installed, from its registry key.
-function Get-InstalledVcRedistVersion {
-    foreach ($key in $script:VcRedistRegistryKeys) {
-        if ((Get-RegistryValue -Path $key -Name 'Installed') -eq 1) {
-            $version = [string](Get-RegistryValue -Path $key -Name 'Version')
-            # The registry writes "v14.44.35211.00"; the file says 14.44.35211.0.
+    foreach ($key in $Row.DetectKeys) {
+        if ((Get-RegistryValue -Path $key -Name $Row.DetectInstalledName) -eq 1) {
+            $version = [string](Get-RegistryValue -Path $key -Name $Row.DetectVersionName)
+            # Visual C++ writes "v14.44.35211.00"; its file says 14.44.35211.0.
             $parsed = ConvertTo-VersionOrNull -Text $version.TrimStart('v')
             if ($parsed) { return @($parsed.ToString()) }
             if ($version) { return @($version.TrimStart('v')) }
@@ -1830,28 +1916,13 @@ function Get-InstalledVcRedistVersion {
     return @()
 }
 
-# Arsenal's driver package: the last commit to it on its branch (its message
-# names the driver version), the download pinned to that commit, and the git
-# blob hash GitHub gives for the file at that commit.
-function Get-ArsenalDriverRemote {
+# A driver's installed version: its device present (a Plug and Play device
+# on the row's service) and the driver file's version; none when the device
+# is gone (e.g. removed, its files waiting for a restart).
+function Get-DriverServiceVersionInstalled {
     param($Row)
-    $commits = @(Get-GitHubJson -Path "/repos/$($Row.Repository)/commits?path=$($Row.RepositoryPath)&sha=$($Row.Branch)&per_page=1")
-    if ($commits.Count -eq 0 -or -not $commits[0].sha) { return (New-Remote -Available $false -Detail "no commit found for $($Row.RepositoryPath)") }
-    $commit = $commits[0]
-    $versionMatch = [regex]::Match([string]$commit.commit.message, $script:ArsenalDriverVersionPattern)
-    if (-not $versionMatch.Success) { throw "the last commit to $($Row.RepositoryPath) ($($commit.sha.Substring(0, 12))) names no driver version" }
-    $content = Get-GitHubJson -Path "/repos/$($Row.Repository)/contents/$($Row.RepositoryPath)?ref=$($commit.sha)"
-    $url = "https://raw.githubusercontent.com/$($Row.Repository)/$($commit.sha)/$($Row.RepositoryPath)"
-    return (New-Remote -Available $true -Version $versionMatch.Groups[1].Value -Build 'x64' -Marker $commit.sha -Url $url -FileName ([System.IO.Path]::GetFileName($Row.RepositoryPath)) `
-            -VendorHashAlgorithm 'GitBlobSHA1' -VendorHash ([string]$content.sha).ToLowerInvariant())
-}
-
-# Arsenal's driver installed: its device present (a Plug and Play device on
-# its service) and the driver file's version; none when the device is gone
-# (e.g. removed, its files waiting for a restart).
-function Get-InstalledArsenalDriverVersion {
-    $devices = @(Get-CimInstance -ClassName Win32_PnPEntity -Filter "Service='$($script:ArsenalDriverService)'" -ErrorAction Stop)
-    $driverPath = Join-Path ([Environment]::SystemDirectory) "drivers\$($script:ArsenalDriverService).sys"
+    $devices = @(Get-CimInstance -ClassName Win32_PnPEntity -Filter "Service='$($Row.DetectService)'" -ErrorAction Stop)
+    $driverPath = Join-Path ([Environment]::SystemDirectory) "drivers\$($Row.DetectService).sys"
     if ($devices.Count -eq 0 -or -not [System.IO.File]::Exists($driverPath)) { return @() }
     $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($driverPath)
     return @('{0}.{1}.{2}.{3}' -f $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart)
@@ -2115,6 +2186,7 @@ function Save-VerifiedDownload {
     if ($Remote.LocalFile) {
         Copy-Item -LiteralPath $Remote.LocalFile -Destination $path -Force -ErrorAction Stop     # downloaded by hand; the copy is checked as a download is
     } else {
+        Add-LogLine -Text "    Downloading $($Remote.Url)"     # the log names every download's source; the console names the file (Write-FileObtainedLine)
         Save-HttpFile -Uri $Remote.Url -Path $path
     }
     $sha256 = Get-FileHashHex -Path $path -Algorithm 'SHA256'
@@ -2141,18 +2213,31 @@ function Save-VerifiedDownload {
     return [pscustomobject]@{ Path = $path; Sha256 = $sha256; VendorHashMatched = $vendorHashMatched; Signer = $signer }
 }
 
+# The line for a file Save-VerifiedDownload obtained, with what was checked
+# ($Facts): "Downloaded <file>", or "Read <file> from <folder>" for a file
+# downloaded by hand, which the script takes from the account's folder.
+function Write-FileObtainedLine {
+    param($Remote, [string]$Facts)
+    if ($Remote.LocalFile) {
+        $obtained = "Read $($Remote.FileName) from $(Format-Unbreakable -Text (Split-Path -Parent $Remote.LocalFile))"
+    } else {
+        $obtained = "Downloaded $($Remote.FileName)"
+    }
+    Write-ConsoleLine -Text "$obtained ($Facts)" -Indent 4
+}
+
 # --- Prerequisite actions ---
 
-# Install (or update) a prerequisite to what its source offers now. Returns
-# the result's detail text; throws on failure.
+# Install (or update) a prerequisite to what its source offers now, by the
+# row's Install kind. Returns the result's detail text; throws on failure.
 function Install-PrerequisiteVersion {
     param($Prerequisite, $Remote, $State)
-    switch ($Prerequisite.Kind) {
-        'DotNet'          { return (Install-DotNetVersion -Prerequisite $Prerequisite -Remote $Remote -State $State) }
-        'VisualCppRedist' { return (Install-VcRedist -Prerequisite $Prerequisite -Remote $Remote -State $State) }
-        'ArsenalDriver'   { return (Install-ArsenalDriver -Prerequisite $Prerequisite -Remote $Remote -State $State) }
+    switch ($Prerequisite.Install) {
+        'DotNet'        { return (Install-DotNetVersion -Prerequisite $Prerequisite -Remote $Remote -State $State) }
+        'Installer'     { return (Install-InstallerPrerequisite -Prerequisite $Prerequisite -Remote $Remote -State $State) }
+        'DriverPackage' { return (Install-DriverPackagePrerequisite -Prerequisite $Prerequisite -Remote $Remote -State $State) }
     }
-    throw "unknown prerequisite kind '$($Prerequisite.Kind)'"
+    throw "unknown install kind '$($Prerequisite.Install)' ($($Prerequisite.Id))"
 }
 
 # The state record of a prerequisite updated in place: its marker, and the
@@ -2171,27 +2256,29 @@ function Set-InPlacePrerequisiteRecord {
     }
 }
 
-# The Visual C++ Redistributable: download, check (Microsoft's SHA-256 from
-# the URL, the signer), read the file's version; install it unless the one
-# installed is that or newer. Never removed.
-function Install-VcRedist {
+# A prerequisite that is an installer (Visual C++): download, check (the
+# vendor's hash where the source gives one, the signer), read the file's
+# version; install it unless the one installed is that or newer. Never
+# removed.
+function Install-InstallerPrerequisite {
     param($Prerequisite, $Remote, $State)
-    $download = Save-VerifiedDownload -Remote $Remote -StagingFolder $script:stagingFolder -ExpectedSigner $Prerequisite.Row.ExpectedSigner
+    $row = $Prerequisite.Row
+    $download = Save-VerifiedDownload -Remote $Remote -StagingFolder $script:stagingFolder -ExpectedSigner $row.ExpectedSigner
     try {
-        Write-ConsoleLine -Text "Downloaded $($Remote.FileName) (SHA-256 $($download.Sha256); vendor hash: $($download.VendorHashMatched); signer: $($download.Signer))" -Indent 4
+        Write-FileObtainedLine -Remote $Remote -Facts "SHA-256 $($download.Sha256); vendor hash: $($download.VendorHashMatched); signer: $($download.Signer)"
         $fileInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($download.Path)
         $fileVersion = '{0}.{1}.{2}.{3}' -f $fileInfo.FileMajorPart, $fileInfo.FileMinorPart, $fileInfo.FileBuildPart, $fileInfo.FilePrivatePart
         $offered = ConvertTo-VersionOrNull -Text $fileVersion
-        $installedBefore = @(Get-InstalledVcRedistVersion)
+        $installedBefore = @(Get-PrerequisiteInstalledVersion -Prerequisite $Prerequisite)
         if ($installedBefore | Where-Object { $present = ConvertTo-VersionOrNull -Text $_; $present -and $present -ge $offered }) {
             Set-InPlacePrerequisiteRecord -Prerequisite $Prerequisite -Remote $Remote -State $State -Version $fileVersion -Download $download -InstalledByScript $false
-            return "$($Prerequisite.DisplayName): $($installedBefore -join ', ') installed, Microsoft's file is ${fileVersion}: nothing to do"
+            return "$($Prerequisite.DisplayName): $($installedBefore -join ', ') installed, the vendor's file is ${fileVersion}: nothing to do"
         }
         Write-ConsoleLine -Text "Installing $fileVersion (installed: $(if ($installedBefore) { $installedBefore -join ', ' } else { 'none' }))" -Indent 4
-        $exitCode = Invoke-ProcessAndWait -FilePath $download.Path -Arguments $Prerequisite.Row.InstallArguments
+        $exitCode = Invoke-ProcessAndWait -FilePath $download.Path -Arguments $row.InstallArguments
         Write-ConsoleLine -Text "Installer exit code: $exitCode" -Indent 4
-        if ($script:VcRedistSuccessExitCodes -notcontains $exitCode) { throw "the installer of $($Prerequisite.DisplayName) $fileVersion exited with $exitCode" }
-        $installedAfter = @(Get-InstalledVcRedistVersion)
+        if ($row.SuccessExitCodes -notcontains $exitCode) { throw "the installer of $($Prerequisite.DisplayName) $fileVersion exited with $exitCode" }
+        $installedAfter = @(Get-PrerequisiteInstalledVersion -Prerequisite $Prerequisite)
         if (-not ($installedAfter | Where-Object { $present = ConvertTo-VersionOrNull -Text $_; $present -and $present -ge $offered })) {
             throw "the installer of $($Prerequisite.DisplayName) $fileVersion exited with $exitCode, but $($installedAfter -join ', ') is installed"
         }
@@ -2207,26 +2294,29 @@ function Install-VcRedist {
     return $detail
 }
 
-# Arsenal's driver: download its package (pinned to the commit, checked
-# against GitHub's git blob hash), extract it with Windows' own tar.exe,
-# check the signers of aim_ll.exe and the driver, install with
-# aim_ll.exe --install, and check the driver's version. Never removed.
-function Install-ArsenalDriver {
+# A prerequisite that is a driver package (Arsenal's): download it (checked
+# against the vendor's hash), extract it with Windows' own tar.exe, check
+# the signers of its installer and its catalogue, verify the INF and the
+# driver folder's binaries as the catalogue's members, run the installer,
+# and check the version installed. Never removed.
+function Install-DriverPackagePrerequisite {
     param($Prerequisite, $Remote, $State)
     $row = $Prerequisite.Row
+    if (-not $Remote.Version) { throw "the source names no version for $($Prerequisite.DisplayName), so an install couldn't be confirmed" }
+    $installerName = Split-Path -Leaf $row.PackageInstaller
     $download = Save-VerifiedDownload -Remote $Remote -StagingFolder $script:stagingFolder
-    $packageFolder = Join-Path $script:stagingFolder 'ArsenalDriver'
+    $packageFolder = Join-Path $script:stagingFolder (($Prerequisite.Id -replace '[^A-Za-z0-9]', '-') + '-package')
     try {
-        Write-ConsoleLine -Text "Downloaded $($Remote.FileName) (SHA-256 $($download.Sha256); vendor hash: $($download.VendorHashMatched))" -Indent 4
+        Write-FileObtainedLine -Remote $Remote -Facts "SHA-256 $($download.Sha256); vendor hash: $($download.VendorHashMatched)"
         $tar = Join-Path ([Environment]::SystemDirectory) 'tar.exe'
-        if (-not [System.IO.File]::Exists($tar)) { throw "Windows' own tar.exe isn't there ($(Format-Unbreakable -Text $tar)): it extracts the driver package" }
+        if (-not [System.IO.File]::Exists($tar)) { throw "Windows' own tar.exe isn't there ($(Format-Unbreakable -Text $tar)): it extracts the package" }
         $null = [System.IO.Directory]::CreateDirectory($packageFolder)
         $tarExit = Invoke-ProcessAndWait -FilePath $tar -Arguments @('-xf', "`"$($download.Path)`"", '-C', "`"$packageFolder`"")
         if ($tarExit -ne 0) { throw "tar.exe could not extract $($Remote.FileName) (exit code $tarExit)" }
         # The vendor's installer carries the vendor's signature; the driver
-        # is taken on its catalogue's (see $ArsenalDriverCatalogue).
-        $installer = Join-Path $packageFolder $script:ArsenalDriverInstaller
-        $catalogue = Join-Path $packageFolder $script:ArsenalDriverCatalogue
+        # is taken on its catalogue's (see $OtherPrerequisites).
+        $installer = Join-Path $packageFolder $row.PackageInstaller
+        $catalogue = Join-Path $packageFolder $row.PackageCatalogue
         $signerDescriptions = @{}
         foreach ($expected in @(@{ Path = $installer; Signer = $row.ExpectedSigner }, @{ Path = $catalogue; Signer = $row.DriverSigner })) {
             if (-not [System.IO.File]::Exists($expected.Path)) { throw "the package has no $(Get-RelativePath -Path $expected.Path -Root $packageFolder)" }
@@ -2234,36 +2324,37 @@ function Install-ArsenalDriver {
             if (-not $check.Accepted) { throw "$(Get-RelativePath -Path $expected.Path -Root $packageFolder) is signed by $($check.Description), expected $($expected.Signer)" }
             $signerDescriptions[$expected.Path] = $check.Description
         }
-        $driverFolder = Join-Path $packageFolder $script:ArsenalDriverFolder
-        if (-not [System.IO.Directory]::Exists($driverFolder)) { throw "the package has no $($script:ArsenalDriverFolder) folder" }
-        $memberPaths = @(Join-Path $packageFolder $script:ArsenalDriverInf)
-        $memberPaths += @(Get-ChildItem -LiteralPath $driverFolder -File -ErrorAction Stop | Where-Object { $name = $_.Name; @($script:ArsenalDriverCataloguedPatterns | Where-Object { $name -like $_ }).Count -gt 0 } | Sort-Object Name | ForEach-Object { $_.FullName })
+        $driverFolder = Join-Path $packageFolder $row.PackageDriverFolder
+        if (-not [System.IO.Directory]::Exists($driverFolder)) { throw "the package has no $($row.PackageDriverFolder) folder" }
+        $memberPaths = @(Join-Path $packageFolder $row.PackageInf)
+        $memberPaths += @(Get-ChildItem -LiteralPath $driverFolder -File -ErrorAction Stop | Where-Object { $name = $_.Name; @($row.PackageCataloguedPatterns | Where-Object { $name -like $_ }).Count -gt 0 } | Sort-Object Name | ForEach-Object { $_.FullName })
         foreach ($memberPath in $memberPaths) {
             if (-not [System.IO.File]::Exists($memberPath)) { throw "the package has no $(Get-RelativePath -Path $memberPath -Root $packageFolder)" }
             $member = Test-CatalogueMember -CataloguePath $catalogue -MemberPath $memberPath
-            if (-not $member.Accepted) { throw "$(Get-RelativePath -Path $memberPath -Root $packageFolder) is not verified by $($script:ArsenalDriverCatalogue): $($member.Description)" }
+            if (-not $member.Accepted) { throw "$(Get-RelativePath -Path $memberPath -Root $packageFolder) is not verified by $($row.PackageCatalogue): $($member.Description)" }
         }
-        Write-ConsoleLine -Text "$($script:ArsenalDriverCatalogue): $($signerDescriptions[$catalogue]); $($memberPaths.Count) file(s) verified as its members" -Indent 4
-        $outputPath = Join-Path $script:stagingFolder 'aim_ll-output.txt'
-        $errorPath = Join-Path $script:stagingFolder 'aim_ll-errors.txt'
-        $exitCode = Invoke-ProcessAndWait -FilePath $installer -Arguments @('--install', "`"$packageFolder`"") -WorkingDirectory $packageFolder -OutputPath $outputPath -ErrorPath $errorPath
+        Write-ConsoleLine -Text "$($row.PackageCatalogue): $($signerDescriptions[$catalogue]); $($memberPaths.Count) file(s) verified as its members" -Indent 4
+        $outputPath = Join-Path $script:stagingFolder "$installerName-output.txt"
+        $errorPath = Join-Path $script:stagingFolder "$installerName-errors.txt"
+        $arguments = @($row.PackageInstallArguments | ForEach-Object { if ($_ -eq '{0}') { "`"$packageFolder`"" } else { $_ } })
+        $exitCode = Invoke-ProcessAndWait -FilePath $installer -Arguments $arguments -WorkingDirectory $packageFolder -OutputPath $outputPath -ErrorPath $errorPath
         foreach ($outputFile in @($outputPath, $errorPath)) {
             if ([System.IO.File]::Exists($outputFile)) {
-                foreach ($line in [System.IO.File]::ReadAllLines($outputFile)) { Add-LogLine -Text "    | $line" }     # aim_ll's own output, as it wrote it
+                foreach ($line in [System.IO.File]::ReadAllLines($outputFile)) { Add-LogLine -Text "    | $line" }     # the installer's own output, as it wrote it
                 Remove-OwnedFile -Path $outputFile -Root $script:stagingFolder
             }
         }
-        Write-ConsoleLine -Text "aim_ll.exe --install exit code: $exitCode" -Indent 4
-        if ($exitCode -ne 0) { throw "aim_ll.exe --install exited with $exitCode" }
-        $installed = @(Get-InstalledArsenalDriverVersion)
+        Write-ConsoleLine -Text "$installerName $($row.PackageInstallArguments[0]) exit code: $exitCode" -Indent 4
+        if ($exitCode -ne 0) { throw "$installerName $($row.PackageInstallArguments[0]) exited with $exitCode" }
+        $installed = @(Get-PrerequisiteInstalledVersion -Prerequisite $Prerequisite)
         if (-not ($installed | Where-Object { Test-SameVersion -First $_ -Second $Remote.Version })) {
-            throw "aim_ll.exe --install exited with 0, but the driver installed is $(if ($installed) { $installed -join ', ' } else { 'none' }), not $($Remote.Version) (a restart may be needed)"
+            throw "$installerName $($row.PackageInstallArguments[0]) exited with 0, but the driver installed is $(if ($installed) { $installed -join ', ' } else { 'none' }), not $($Remote.Version) (a restart may be needed)"
         }
     } finally {
         try { Remove-OwnedFolder -Path $packageFolder -Root $script:stagingFolder } catch {}
         try { Remove-OwnedFile -Path $download.Path -Root $script:stagingFolder } catch {}
     }
-    $checkedSigners = "$($script:ArsenalDriverCatalogue): $($signerDescriptions[$catalogue]); $(Split-Path -Leaf $script:ArsenalDriverInstaller): $($signerDescriptions[$installer])"
+    $checkedSigners = "$($row.PackageCatalogue): $($signerDescriptions[$catalogue]); ${installerName}: $($signerDescriptions[$installer])"
     Set-InPlacePrerequisiteRecord -Prerequisite $Prerequisite -Remote $Remote -State $State -Version $Remote.Version -Download $download -InstalledByScript $true -Signer $checkedSigners
     return "$($Prerequisite.DisplayName) $($Remote.Version) installed (commit $($Remote.Marker.Substring(0, 12)))"
 }
@@ -2274,7 +2365,7 @@ function Install-ArsenalDriver {
 function Install-DotNetVersion {
     param($Prerequisite, $Remote, $State)
     $download = Save-VerifiedDownload -Remote $Remote -StagingFolder $script:installersFolder -ExpectedSigner $script:DotNetExpectedSigner
-    Write-ConsoleLine -Text "Downloaded $($Remote.FileName) (SHA-256 $($download.Sha256); vendor hash: $($download.VendorHashMatched); signer: $($download.Signer))" -Indent 4
+    Write-FileObtainedLine -Remote $Remote -Facts "SHA-256 $($download.Sha256); vendor hash: $($download.VendorHashMatched); signer: $($download.Signer)"
     try {
         $exitCode = Invoke-ProcessAndWait -FilePath $download.Path -Arguments $script:DotNetInstallArguments
         Write-ConsoleLine -Text "Installer exit code: $exitCode" -Indent 4
@@ -2722,7 +2813,7 @@ function Install-Tool {
     Remove-OwnedFolder -Path $oldFolder -Root $script:installRoot
 
     $download = Save-VerifiedDownload -Remote $Remote -StagingFolder $script:stagingFolder
-    Write-ConsoleLine -Text "Downloaded $($Remote.FileName) (SHA-256 $($download.Sha256); vendor hash: $($download.VendorHashMatched))" -Indent 4
+    Write-FileObtainedLine -Remote $Remote -Facts "SHA-256 $($download.Sha256); vendor hash: $($download.VendorHashMatched)"
     $entryPoint = @(@($CatalogueTool.Gui) + @($CatalogueTool.Cli) | Where-Object { $_ }) | Select-Object -First 1
     $installedIsWhole = [System.IO.File]::Exists((Join-Path $finalFolder $entryPoint))
     if (-not $Reinstall -and $installedIsWhole -and $State.Tools.ContainsKey($CatalogueTool.Name) -and $State.Tools[$CatalogueTool.Name].DownloadSha256 -eq $download.Sha256) {
@@ -3659,7 +3750,7 @@ $results = New-Object System.Collections.Generic.List[object]
 $runWarnings = New-Object System.Collections.Generic.List[string]
 $runFailures = New-Object System.Collections.Generic.List[string]
 $prerequisitesNotOwned = New-Object System.Collections.Generic.List[object]
-$ezIndex = $null
+$ezIndexBySource = @{}
 $dotNetIndex = $null
 $gitHubReleasesByRepository = @{}
 $useColour = -not [Console]::IsOutputRedirected
@@ -3766,14 +3857,20 @@ if (-not $dryRun -and -not $Verify -and -not $elevated) {
     Exit-Run -Code $elevatedExitCode
 }
 
-# The catalogue itself: every row's family and category must be in their
-# tables (an adapted copy's slip, caught before anything is done).
+# The catalogue itself: every row's family, category and source must be in
+# their tables, and every prerequisite's source too (an adapted copy's
+# slip, caught before anything is done).
 $familyNames = @($Families | ForEach-Object { $_.Name })
+$sourceNames = @($Sources | ForEach-Object { $_.Name })
 $catalogueProblems = @(foreach ($row in $Catalogue) {
     if ($familyNames -notcontains $row.Family) { "$($row.Name): family '$($row.Family)' is not in `$Families" }
     if ($Categories -notcontains $row.Category) { "$($row.Name): category '$($row.Category)' is not in `$Categories" }
+    if ($sourceNames -notcontains $row.Source) { "$($row.Name): source '$($row.Source)' is not in `$Sources" }
 })
-if ($catalogueProblems.Count -gt 0) { Stop-Run -Reason 'the catalogue has rows naming a family or category that has no entry:' -List $catalogueProblems }
+$catalogueProblems += @(foreach ($row in $OtherPrerequisites) {
+    if ($sourceNames -notcontains $row.Source) { "$($row.Capability): source '$($row.Source)' is not in `$Sources" }
+})
+if ($catalogueProblems.Count -gt 0) { Stop-Run -Reason 'the catalogue has rows naming a family, category or source that has no entry:' -List $catalogueProblems }
 
 # The selection: every name must be in the catalogue. A category may be
 # given without its spaces (FileActivity).
@@ -3900,7 +3997,7 @@ foreach ($catalogueTool in $selectedTools) {
     $check = [pscustomobject]@{ Tool = $catalogueTool; Record = $record; Remote = $null; Status = ''; Detail = ''; MoveFrom = '' }
     if ($record -and -not (Test-ToolInPlace -CatalogueTool $catalogueTool -Record $record)) { $check.MoveFrom = $record.Folder }
     try {
-        $check.Remote = Get-ToolRemote -CatalogueTool $catalogueTool
+        $check.Remote = Get-SourceRemote -Row $catalogueTool
         $entryPoint = @(@($catalogueTool.Gui) + @($catalogueTool.Cli) | Where-Object { $_ }) | Select-Object -First 1
         $installedAndWhole = $record -and [System.IO.File]::Exists((Join-Path (Get-ToolInstalledFolder -Record $record) $entryPoint))
         if (-not $check.Remote.Available) {
@@ -3930,10 +4027,13 @@ foreach ($catalogueTool in $selectedTools) {
     $toolChecks.Add($check)
 }
 
-if (@($selectedTools | Where-Object { $_.Source -eq 'EZTools' }).Count -gt 0) {
+# An index source lists every zip the vendor offers: those in the catalogue
+# were checked above; the rest are named, so a tool the vendor adds is seen.
+foreach ($indexSource in @($Sources | Where-Object { $_.Kind -eq 'EzIndex' })) {
+    if (@($selectedTools | Where-Object { $_.Source -eq $indexSource.Name }).Count -eq 0) { continue }
     try {
-        $notInCatalogue = @(Get-EzToolNotInCatalogue)
-        if ($notInCatalogue.Count -gt 0) { Write-ConsoleLine -Text "Available from Zimmerman, not in the catalogue: $($notInCatalogue -join ', ')" -Indent 2 }
+        $notInCatalogue = @(Get-EzIndexNotInCatalogue -Source $indexSource)
+        if ($notInCatalogue.Count -gt 0) { Write-ConsoleLine -Text "Available from $($indexSource.Name), not in the catalogue: $($notInCatalogue -join ', ')" -Indent 2 }
     } catch {}
 }
 

@@ -203,31 +203,53 @@ removing the driver needs a restart.
 
 ## Adapting it
 
-Everything specific to a tool or vendor sits in tables at the top of the
-script (CONFIG), each field documented beside it; the rest is shared.
+Everything specific to a tool, a vendor or a prerequisite sits in tables at
+the top of the script (CONFIG), each field documented beside it; the rest
+is shared.
 
 | To | Change |
 |---|---|
-| Add a Zimmerman tool left out | Take its zip out of `$EzOutOfScope` and add a `$Catalogue` row, copied from a similar tool's |
+| Add a Zimmerman tool left out | Take its zip out of the `EZTools` source's `OutOfScope` and add a `$Catalogue` row, copied from a similar tool's |
 | Drop a tool | Remove its `$Catalogue` row: the next full run removes it from the workstation, with its PATH entry and shortcuts |
-| Add a NirSoft tool | A `$Catalogue` row; `Package` is the name in its PAD and zip URLs, the x64 build is picked when there is one (`$NirSoftBuilds`) |
+| Add a NirSoft tool | A `$Catalogue` row; `Package` is the name in its PAD and zip URLs, the x64 build is picked when there is one |
 | Add a Sysinternals tool | A `$Catalogue` row; `Package` is the zip's name, `Files` its x64 files, `EulaKeys` its key under `HKCU\Software\Sysinternals` |
-| Add a tool released on GitHub, or published at a fixed URL | A `$Families` row (its signer) and a `$Catalogue` row with `Source = 'GitHubRelease'` (`Package` the `owner/repository`, `AssetPattern` the asset's name; SRUM-DUMP is one) or `Source = 'DirectUrl'` (`Package` the URL); `Build` names the build where the source doesn't (`x64`, or a .NET tool's line such as `net10`). An asset that is a zip is extracted; one that is the exe itself is installed as it is. No code |
-| Add a vendor with its own download page or feed | A `$Families` row, its `$Catalogue` rows, and a source adapter: a function `Get-<Source>Remote` returning `New-Remote` (below), with its line in `Get-ToolRemote` |
+| Add a tool released on GitHub | A `$Families` row (its signer) and a `$Catalogue` row with `Source = 'GitHub'`, `Package` the `owner/repository`, `AssetPattern` the asset's name (SRUM-DUMP is one). An asset that is a zip is extracted; one that is the exe itself is installed as it is |
+| Add a vendor of a known kind (below) | A `$Sources` row with that `Kind` and its settings, a `$Families` row, and its `$Catalogue` rows naming the source. No code |
+| Add a vendor of a new kind | A `$Sources` row with a new `Kind`, one function `Get-<Kind>Remote` returning `New-Remote` (the contract, below), and its line in `Get-SourceRemote` |
+| Add a prerequisite | A `$Sources` row for where it comes from, and an `$OtherPrerequisites` row naming it, its `Detect` kind (how the installed version is read) and its `Install` kind, with their settings; its `Capability` in the `Requires` of the tools that need it |
 | Put a tool in another category, or add a category | The row's `Category`; a new name in `$Categories`. The next update run moves the tool's folder as it is (nothing downloaded) and remakes its shortcuts |
 | Add a .NET runtime flavour, or maps synced like EvtxECmd's | A row of `$DotNetFlavours` or `$AncillaryContent` |
+
+A `$Catalogue` row's `Build` names the build where the source doesn't
+(`x64`, or a .NET tool's line such as `net10`, which its runtimeconfig.json
+must confirm at install).
 
 An adapted copy's SHA-256 isn't the one published for its version, so it
 never updates itself from this repository; set `$SelfUpdateRepository` to
 `''`, or to your own repository's releases (the same asset and notes
 layout), to say so plainly.
 
+### The source kinds
+
+| Kind | What it fetches | Settings on the `$Sources` row | Used by |
+|---|---|---|---|
+| `EzIndex` | One index page listing every zip with its .NET line; zips in that line not in the catalogue are reported as available | `IndexUrl`, `DownloadPattern`, `CurrentLinePattern`, `OutOfScope` | Zimmerman |
+| `VersionPage` | One page or feed per tool, the version (and the vendor's hash, where published) read by a pattern; then download URLs tried by build, or a hand download expected in the Downloads folder | `PageUrl`, `VersionPattern` (named groups `version`, `hash`), `HashAlgorithm`, `FileName`, `Downloads` (`Build`, `Suffix`, `Url`) or `ManualDownload` | NirSoft; Arsenal Image Mounter |
+| `DirectUrl` | A file at a fixed URL; the server's headers are the change marker | `Url` (a template; `{0}` where `Package` is the URL) | Sysinternals |
+| `GitHubRelease` | The latest release's asset, its SHA-256 digest from the API the vendor's hash | none (`Package` and `AssetPattern` on the tool's row) | SRUM-DUMP |
+| `RedirectedUrl` | A permanent link that redirects to the current file; the vendor's hash read from the final URL | `Url`, `HashInUrlPattern`, `HashAlgorithm` | Visual C++ Redistributable |
+| `GitHubFile` | A file in a repository at the last commit to it, the version from the commit's message, the git blob hash the vendor's hash | `VersionPattern` (`Package`, `RepositoryPath` and `Branch` on the row) | AIM's driver package |
+
+In a template, `{0}` is the row's `Package`, `{1}` the version the source
+states, `{2}` the build's suffix.
+
 ### The adapter contract
 
 An adapter only says what the source offers now; everything after that is
 shared: downloading, the hash and signer checks, extraction, the install and
-swap, PATH, shortcuts, writable folders, clean-up and the records. It
-returns `New-Remote` with:
+swap, PATH, shortcuts, writable folders, clean-up and the records. It takes
+the `$Sources` row and the tool's (or prerequisite's) row, and returns
+`New-Remote` with:
 
 | Field | Meaning |
 |---|---|
@@ -239,9 +261,8 @@ returns `New-Remote` with:
 | `VendorHashAlgorithm`, `VendorHash` | The vendor's published hash of the file, where there is one (`SHA256`, `SHA512`, `MD5`, `GitBlobSHA1`); the download is refused when it differs |
 | `LocalFile`, `NeedsManualDownload`, `Detail` | For a file the user downloads by hand (Arsenal Image Mounter): the file's path once it is there, and what to download and where until then |
 
-`Get-DirectUrlRemote` (five lines) and `Get-GitHubReleaseRemote` are the
-generic adapters; `Get-SysinternalsRemote` shows a vendor-specific one that
-only builds the URL and calls the generic one.
+`Get-DirectUrlRemote` (six lines) is the smallest adapter; `Get-VersionPageRemote`
+the one with the most settings.
 
 ## Where things go
 
@@ -285,7 +306,8 @@ and the script's own shortcut directly.*
 ## What the output shows
 
 Each run writes `Runs\<UTC time>\run.log` under the records folder (a dry run
-or `-Verify` without elevation writes under `%LocalAppData%` instead). An
+or `-Verify` without elevation writes under `%LocalAppData%` instead): what
+the console shows, with the address of every download. An
 update also writes, at the records folder's root and in the run's folder:
 
 | File | Holds |
@@ -335,7 +357,6 @@ else between runs beyond what `-Verify` finds.
 - It doesn't download Arsenal Image Mounter (you do; see the catalogue).
 - It never removes the Visual C++ Redistributable or AIM's driver; Windows'
   driver store keeps each AIM driver package installed.
-- MemProcFS and KAPE are not in the catalogue.
 - arm64 Windows is not supported.
 
 ## Contributing
