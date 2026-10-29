@@ -8,9 +8,11 @@ removing what is no longer needed.
 It isn't a forensic suite. It keeps the many small standalone tools up to
 date, so the workstation is ready before an investigation: Eric Zimmerman's
 tools (EZ Tools) with their EvtxECmd maps, RECmd batch files and SQLECmd
-maps, NirSoft's forensic utilities, Sysinternals tools and Arsenal Image
-Mounter with its driver, with the .NET runtimes and Visual C++
-Redistributable they need. Every download is hashed, checked against the
+maps, the NirSoft utilities that read collected artefacts, Sysinternals tools, SRUM-DUMP,
+Velociraptor, DB Browser for SQLite and Arsenal Image Mounter with its
+driver, with the .NET runtimes and Visual C++ Redistributable they need;
+FTK Imager and DCode, which have installers of their own, are watched for
+new versions where installed. Every download is hashed, checked against the
 vendor's published hash and signer, and recorded, so the tool versions
 behind an analysis can be cited later.
 
@@ -18,7 +20,7 @@ The selection is mine. Use it as it is, or adapt it: adding or
 dropping a tool is a row in a table, and another vendor's set needs only a
 small function that finds its downloads (see [Adapting it](#adapting-it)).
 
-<img src="docs/images/demo.webp" alt="Console, 80 columns: .\Update-ForensicWorkstation.ps1 typed at a Windows PowerShell prompt; the header (version 0.6.0, host, OS, elevated account, the script's SHA-256, the tools and records folders, the log); Script, this script current and the installed copy this file; Checking sources, each of the 43 tools, the driver, the Visual C++ Redistributable, the .NET Desktop Runtime 10 and the three ancillary sets current except EvtxECmd and USBDeview (update available) and the EvtxECmd maps (changed upstream); the plan (update Event Logs\EvtxECmd, update Connected Devices\USBDeview, sync the EvtxECmd maps); both downloads with their SHA-256 and signer; the maps synced (475 files); nothing to remove; PATH and shortcuts unchanged; the records written; RESULT: PASS with the script and every category PASS, and INFO, the scheduled task disabled">
+<img src="docs/images/demo.webp" alt="Console, 80 columns: .\Update-ForensicWorkstation.ps1 typed at a Windows PowerShell prompt; the header (version 1.0.0, host, OS, elevated account, the script's SHA-256, the tools and records folders, GitHub without a token, the log); Script, this script current and the installed copy this file; Checking sources, each of the 62 tools, the driver, the Visual C++ Redistributable, the .NET Desktop Runtime 10 and the three ancillary sets current except EvtxECmd and USBDeview (update available) and the EvtxECmd maps (changed upstream), and the watched tools FTK Imager and DCode not installed; the plan (update Event Logs\EvtxECmd, update Connected Devices\USBDeview, sync the EvtxECmd maps); both downloads with their SHA-256 and signer; the maps synced (475 files); nothing to remove; PATH and shortcuts unchanged; the records written; RESULT: PASS with the script and every category PASS, and INFO, the scheduled task disabled">
 
 An update with two tools and the EvtxECmd maps due, typed at a Windows
 PowerShell prompt (in Windows Sandbox), in real time; the last frame is held
@@ -32,6 +34,7 @@ for four seconds.
 - [The catalogue](#the-catalogue)
 - [Adapting it](#adapting-it)
 - [Where things go](#where-things-go)
+- [Compatibility](#compatibility)
 - [What the output shows](#what-the-output-shows)
 - [What it does not do](#what-it-does-not-do)
 - [Contributing](#contributing)
@@ -66,8 +69,10 @@ for four seconds.
   only when all of that passes; a tool running from its folder is left as it
   is.
 - Lays the workstation out by what each tool examines: a folder per
-  category (System, Accounts, File Activity, Execution, Connected Devices,
-  Registry, Event Logs, Acquisition, Other) under Program Files, on the
+  category (System, Accounts, File Activity, Execution, Commands,
+  Persistence, Lateral Movement, Connected Devices, Registry, Event Logs,
+  Browsers, Acquisition, Other; a category with no tool has none) under
+  Program Files, on the
   Desktop and in the Start Menu alike. Command-line tools go on the machine
   PATH, so they run by name from any terminal; GUI tools get shortcuts in
   their category's folder (Timeline Explorer directly, used with
@@ -84,9 +89,13 @@ for four seconds.
   (UAC) and finishes in its own window.
 - Keeps itself current: an update run installs this repository's latest
   release, checked against GitHub's SHA-256 digest of the file and the
-  SHA-256 in the release notes, and hands the run over to it.
+  SHA-256 in the release notes, and hands the run over to it before any
+  other source is checked.
 - Opens Arsenal Image Mounter's downloads page in the default browser when
   its zip is due and missing.
+- Watches tools that have installers of their own (FTK Imager, DCode): where
+  one is installed and a newer version is out, it warns and opens the
+  vendor's page; it never installs them.
 - Optionally keeps the workstation current by itself: a daily scheduled
   update, elevated without a prompt, silent unless something fails or a
   zip has to be downloaded by hand.
@@ -114,9 +123,16 @@ Unblock-File .\Update-ForensicWorkstation-*.ps1
   machine.
 - Internet access to the vendors' download sites, GitHub (the maps, and
   this script's releases) and Microsoft's .NET release metadata, through
-  the account's system proxy settings. GitHub allows 60 calls an hour per
-  address without an account; a run makes about six, so a dozen runs in an
-  hour from one address reach it, and the run says so until it resets.
+  the account's system proxy settings. GitHub limits calls from an address
+  without an account; when the limit is reached, the run says so until it
+  resets:
+
+  | | Calls |
+  |---|---|
+  | GitHub allows, per address, an hour | 60 |
+  | With a token (below), an hour | 5,000 |
+  | A full run makes | about 9 |
+  | So full runs in an hour from one address, without a token | about 6 |
 
 ## Usage
 
@@ -143,17 +159,32 @@ Unblock-File .\Update-ForensicWorkstation-*.ps1
 |---|---|
 | `-CheckOnly` | The dry run: every source is checked and every action an update would take is listed; nothing changes. `-WhatIf` does the same. |
 | `-Verify` | Re-hashes the installed files against `files.csv` and lists files missing, changed or not on record; a tool on record in `state.json` with no files in `files.csv` is a FAIL. No network access. |
-| `-Family` | Limits the run to these families (where the tools come from): `Zimmerman`, `NirSoft`, `Sysinternals`, `Arsenal`, `SRUM-DUMP`. |
+| `-Family` | Limits the run to these families (where the tools come from): `Zimmerman`, `NirSoft`, `Sysinternals`, `Arsenal`, `SRUM-DUMP`, `Velocidex`, `sqlitebrowser`. |
 | `-Category` | Limits the run to these categories (what the tools examine; the table below). A name may be given without its spaces: `-Category FileActivity`. |
 | `-Tool` | Limits the run to these tools (names as in the catalogue). |
 | `-Pause` | Keeps the window open at the end, for a run started from a shortcut (the script's own shortcut passes it; a run started from Explorer pauses anyway). |
 | `-NoSelfUpdate` | Runs this copy as it is, without checking for a newer release. The run handed over after a self-update uses it. |
-| `-ElevatedRelaunch` | Set by the script itself on the run it starts elevated; such a run that still has no administrator rights stops instead of relaunching again. |
 | `-ScheduledUpdate` | `Enable` sets up the scheduled update (below), `Disable` removes it; nothing else is done in that run. |
+
+Set by the script itself, not for typing at a prompt:
+
+| Parameter | Effect |
+|---|---|
+| `-ElevatedRelaunch` | On the run it starts elevated: such a run that still has no administrator rights stops instead of relaunching again. |
 | `-Scheduled` | The scheduled update's own run, as its task starts it: a full update, unattended. |
 
+A GitHub token, optional: set the environment variable
+`FORENSIC_WORKSTATION_GITHUB_TOKEN` (for your account, so the elevated run
+and the scheduled one see it) to a fine-grained token with read-only
+access to public repositories and no permissions. The script sends it only
+to GitHub's API (`api.github.com`), never with a download, and writes it
+nowhere; the header says whether the run has one. A token GitHub refuses
+makes every GitHub check a WARN saying so, never a quiet fall-back.
+
 Exit codes: 0 PASS, 1 WARN, 2 FAIL, 3 stopped before any work (e.g.
-another update run in progress, or an update elevated as another account).
+another update run in progress, an update elevated as another account, or
+administrator rights declined). After a self-update the run ends with the
+new release's exit code, or 2 when the new release could not be started.
 
 ### The scheduled update
 
@@ -172,10 +203,11 @@ has installed the script's copy under Program Files, registers a task,
   run's.
 
 It doesn't interrupt you: a tool you have open stays as it is until the
-next day's run. It tells you only two things, as Windows notifications:
-a run that failed (a click opens its log), and a zip the script can't
+next day's run. It tells you only three things, as Windows notifications:
+a run that failed (a click opens its log); a zip the script can't
 download itself (Arsenal Image Mounter's), one per vendor page (a click
-opens the page). It never opens a page itself. Every run's result block
+opens the page); and a newer version of a watched tool (a click opens its
+page). It never opens a page itself. Every run's result block
 ends with the scheduled update's state (What the output shows).
 
 ## The catalogue
@@ -183,33 +215,50 @@ ends with the scheduled update's state (What the output shows).
 | Family | Tools | Source |
 |---|---|---|
 | Zimmerman | GUI: JumpList Explorer, MFT Explorer, Registry Explorer, SDB Explorer, ShellBags Explorer, Timeline Explorer. CLI: AmcacheParser, AppCompatCacheParser, EvtxECmd, JLECmd, LECmd, MFTECmd, PECmd, RBCmd, RecentFileCacheParser, RECmd, SBECmd, SQLECmd, SrumECmd, SumECmd, WxTCmd | download.ericzimmermanstools.com |
-| NirSoft | AppCompatibilityView, AppResourcesUsageView, FullEventLogView, JumpListsView, OfflineRegistryFinder, OfflineRegistryView, RecentFilesView, ShellBagsView, ShortcutsMan, TurnedOnTimesView, USBDeview, UserAssistView, UserProfilesView, WinPrefetchView | nirsoft.net |
+| NirSoft | AppCrashView, AppResourcesUsageView, BootPerformanceView, BrowserDownloadsView, BrowsingHistoryView, DevManView, ESEDatabaseView, FullEventLogView, InstalledAppView, InstalledPackagesView, JumpListsView, MyLastSearch, NetworkUsageView, OfflineRegistryFinder, OfflineRegistryView, RecentFilesView, RegFileExport (console), RegistryChangesView, ShellBagsView, ShortcutsMan, ShutdownPerformanceView, TurnedOnTimesView, UninstallView, USBDeview, USBDriveLog, WhatInStartup, WifiHistoryView, WinDefLogView, WinLogOnView, WinPrefetchView | nirsoft.net |
 | Sysinternals | Autoruns (and autorunsc), Disk2vhd, Process Explorer | download.sysinternals.com |
 | Arsenal | Arsenal Image Mounter (GUI, and `aim_cli`, `aim_pro`) | arsenalrecon.com: version and MD5; the zip downloaded by hand (MEGA) |
 | SRUM-DUMP | SRUM-DUMP (GUI, and `srum_dump` on the PATH: one exe, two copies) | GitHub releases (MarkBaggett/srum-dump), the asset's SHA-256 digest |
+| Velocidex | Velociraptor (a shortcut that runs `velociraptor.exe gui`, and `velociraptor` on the PATH: one exe, two copies) | GitHub releases (Velocidex/velociraptor), the asset's SHA-256 digest; the highest version of the 64-bit exe |
+| sqlitebrowser | DB Browser for SQLite (and DB Browser for SQLCipher, in its zip) | GitHub releases (sqlitebrowser/sqlitebrowser), the "no installer" 64-bit zip; no digest published, so both exes' signers are the check |
 
 Zimmerman tools are those of the vendor's "Forensic tools" section with a
 build on a current .NET line, all .NET 10 today; Hasher, bstrings, rla, EZ
 Viewer and VSCMount are not included. A
 tool the vendor adds is reported as available, not installed, until it is in
-the catalogue. Seven of the NirSoft tools have no x64 build and are
-installed as x86. SRUM-DUMP's exe is unsigned; it is checked against
-GitHub's digest and recorded by its SHA-256.
+the catalogue. The NirSoft tools are those that read collected artefacts
+(a collector's output or a Velociraptor collection), not only the running
+system, and only NirSoft's browser tools that cover many browsers; those
+with no x64 build are installed as x86. Each starts with the settings for
+collected artefacts: times in UTC (NirSoft calls it GMT), no time filter
+(FullEventLogView's default shows only the last 7 days), and a header line
+in exports, written into its `.cfg` while the file is new or empty; once
+the tool has saved its own settings there, the file is left as it is.
+SRUM-DUMP's exe is unsigned; it is checked against
+GitHub's digest and recorded by its SHA-256. Velociraptor's `gui` keeps its
+datastore in your temporary folder and serves its web interface on
+localhost, with a local client that collects from this machine.
 
 The family says where a tool comes from; its category says what it
 examines, and that is how the workstation is laid out (Where things go):
 
 | Category | Tools |
 |---|---|
-| System | TurnedOnTimesView, Process Explorer, Autoruns, autorunsc |
-| Accounts | UserProfilesView, SumECmd |
-| File Activity | MFT Explorer, MFTECmd, RBCmd, ShortcutsMan, LECmd, JumpList Explorer, JumpListsView, JLECmd, RecentFilesView, ShellBags Explorer, ShellBagsView, SBECmd, SDB Explorer, AppCompatCacheParser, AppCompatibilityView |
-| Execution | WinPrefetchView, PECmd, AppResourcesUsageView, SrumECmd, SRUM-DUMP, WxTCmd, AmcacheParser, UserAssistView, RecentFileCacheParser |
-| Connected Devices | USBDeview |
-| Registry | Registry Explorer, OfflineRegistryView, RECmd, OfflineRegistryFinder |
-| Event Logs | FullEventLogView, EvtxECmd |
-| Acquisition | Disk2vhd, Arsenal Image Mounter, AIM CLI |
-| Other | Timeline Explorer, SQLECmd |
+| System | TurnedOnTimesView, BootPerformanceView, ShutdownPerformanceView, WifiHistoryView, Process Explorer |
+| Accounts | SumECmd, WinLogOnView |
+| File Activity | MFT Explorer, MFTECmd, RBCmd, ShortcutsMan, LECmd, JumpList Explorer, JumpListsView, JLECmd, RecentFilesView, ShellBags Explorer, ShellBagsView, SBECmd, SDB Explorer, AppCompatCacheParser |
+| Execution | WinPrefetchView, PECmd, AppResourcesUsageView, SrumECmd, SRUM-DUMP, AmcacheParser, RecentFileCacheParser, AppCrashView, NetworkUsageView, UninstallView, InstalledAppView, InstalledPackagesView |
+| Persistence | Autoruns, autorunsc, WhatInStartup |
+| Connected Devices | USBDeview, DevManView, USBDriveLog |
+| Registry | Registry Explorer, OfflineRegistryView, RECmd, OfflineRegistryFinder, RegistryChangesView, RegFileExport |
+| Event Logs | FullEventLogView, EvtxECmd, WinDefLogView |
+| Browsers | BrowsingHistoryView, BrowserDownloadsView, MyLastSearch |
+| Acquisition | Disk2vhd, Arsenal Image Mounter, AIM CLI, Velociraptor |
+| Other | Timeline Explorer, SQLECmd, WxTCmd, ESEDatabaseView, DB Browser for SQLite |
+
+A tool for one area goes in that area's category even when it reads the
+registry or an event log; Registry, Event Logs and Other hold the tools
+that cover many. Commands and Lateral Movement have no tool yet.
 
 | Prerequisite | When | Source |
 |---|---|---|
@@ -232,6 +281,23 @@ then installed with their `aim_ll.exe`). Visual C++ and the driver are
 kept current and never removed: other programs share Visual C++, and
 removing the driver needs a restart.
 
+**Watched only.** Tools that come with an installer of their own are not
+installed or updated by the script; it only keeps loose tools. Where one of
+these is installed, each run without a selection compares its version (from
+Windows' list of installed programs) with the vendor's latest and, when a
+newer one is out, warns with the vendor's page (opened in an update run, a
+notification in a scheduled one), as for a hand download:
+
+| Tool | Version read from |
+|---|---|
+| FTK Imager | exterro.com/ftk-downloads (the newest release's page) |
+| DCode | digital-detective.net/dcode (the build it states) |
+
+The versions are compared to the precision the vendor gives: 8.3 against an
+installed 8.3.0.27 is current to the vendor's page, so a patch build
+released under the same name (an 8.3.0.30) is not seen. They are listed in
+the inventory as `Tool` rows owned `no`.
+
 ## Adapting it
 
 Everything specific to a tool, a vendor or a prerequisite sits in tables at
@@ -244,7 +310,10 @@ is shared.
 | Drop a tool | Remove its `$Catalogue` row: the next full run removes it from the workstation, with its PATH entry and shortcuts |
 | Add a NirSoft tool | A `$Catalogue` row; `Package` is the name in its PAD and zip URLs, the x64 build is picked when there is one |
 | Add a Sysinternals tool | A `$Catalogue` row; `Package` is the zip's name, `Files` its x64 files, `EulaKeys` its key under `HKCU\Software\Sysinternals` |
-| Add a tool released on GitHub | A `$Families` row (its signer) and a `$Catalogue` row with `Source = 'GitHub'`, `Package` the `owner/repository`, `AssetPattern` the asset's name (SRUM-DUMP is one). An asset that is a zip is extracted; one that is the exe itself is installed as it is |
+| Add a tool released on GitHub | A `$Families` row (its signer) and a `$Catalogue` row with `Source = 'GitHub'`, `Package` the `owner/repository`, `AssetPattern` the asset's name (SRUM-DUMP is one). An asset that is a zip is extracted; one that is the exe itself is installed as it is (decompressed if it ends in `.gz`), under `InstalledFileName` where its own name carries its version; a `version` group in `AssetPattern` takes the highest of several (Velociraptor) |
+| Give a GUI tool's shortcut arguments | `GuiArguments` on its row (Velociraptor's `gui`) |
+| Check the signer of an exe that is neither the GUI nor a command-line one | `OtherExes` on its row (DB Browser for SQLCipher) |
+| Watch a tool that has its own installer | A `$WatchedTools` row: the pattern its name matches among Windows' installed programs, and a `VersionPage` source read for the vendor's latest version (FTK Imager, DCode). It is never installed |
 | Add a vendor of a known kind (below) | A `$Sources` row with that `Kind` and its settings, a `$Families` row, and its `$Catalogue` rows naming the source. No code |
 | Add a vendor of a new kind | A `$Sources` row with a new `Kind`, one function `Get-<Kind>Remote` returning `New-Remote` (the contract, below), and its line in `Get-SourceRemote` |
 | Add a prerequisite | A `$Sources` row for where it comes from, and an `$OtherPrerequisites` row naming it, its `Detect` kind (how the installed version is read) and its `Install` kind, with their settings; its `Capability` in the `Requires` of the tools that need it |
@@ -266,9 +335,9 @@ layout), to say so plainly.
 | Kind | What it fetches | Settings on the `$Sources` row | Used by |
 |---|---|---|---|
 | `EzIndex` | One index page listing every zip with its .NET line; zips in that line not in the catalogue are reported as available | `IndexUrl`, `DownloadPattern`, `CurrentLinePattern`, `OutOfScope` | Zimmerman |
-| `VersionPage` | One page or feed per tool, the version (and the vendor's hash, where published) read by a pattern; then download URLs tried by build, or a hand download expected in the Downloads folder | `PageUrl`, `VersionPattern` (named groups `version`, `hash`), `HashAlgorithm`, `FileName`, `Downloads` (`Build`, `Suffix`, `Url`) or `ManualDownload` (with `DownloadPageUrl`, the page you download from, where it isn't `PageUrl`) | NirSoft; Arsenal Image Mounter |
+| `VersionPage` | One page or feed per tool, the version (and the vendor's hash, where published) read by a pattern; then download URLs tried by build, or a hand download expected in the Downloads folder | `PageUrl`, `VersionPattern` (named groups `version`, `hash`), `HashAlgorithm`, `FileName`, `Downloads` (`Build`, `Suffix`, `Url`) or `ManualDownload` (with `DownloadPageUrl`, the page you download from, where it isn't `PageUrl`); `HighestVersion` (the highest match, not the first), `VersionSeparator` (a character written in place of a dot) | NirSoft; Arsenal Image Mounter; the watched tools' versions |
 | `DirectUrl` | A file at a fixed URL; the server's headers are the change marker | `Url` (a template; `{0}` where `Package` is the URL) | Sysinternals |
-| `GitHubRelease` | The latest release's asset, its SHA-256 digest from the API the vendor's hash | none (`Package` and `AssetPattern` on the tool's row) | SRUM-DUMP |
+| `GitHubRelease` | The latest release's asset, its SHA-256 digest from the API the vendor's hash | none (`Package`, `AssetPattern` and `InstalledFileName` on the tool's row) | SRUM-DUMP, Velociraptor, DB Browser for SQLite |
 | `RedirectedUrl` | A permanent link that redirects to the current file; the vendor's hash read from the final URL | `Url`, `HashInUrlPattern`, `HashAlgorithm` | Visual C++ Redistributable |
 | `GitHubFile` | A file in a repository at the last commit to it, the version from the commit's message, the git blob hash the vendor's hash | `VersionPattern` (`Package`, `RepositoryPath` and `Branch` on the row) | AIM's driver package |
 
@@ -326,15 +395,53 @@ its own, so `autorunsc64` is on the PATH and the Autoruns GUI is not;
 SRUM-DUMP likewise: the GUI's copy has the shortcut, the `srum_dump` copy
 is on the PATH.
 
-A workstation built by a version before 0.3.0 (folders by family) is laid
-out by category on its first update run: each tool's folder is moved as it
+A workstation built by an earlier version is laid out by today's
+categories on its first update run (before 0.3.0, folders were by family;
+1.0.0 moved Autoruns, autorunsc and WxTCmd): each tool's folder is moved as it
 is, settings and grants with it, nothing downloaded, and its shortcuts and
 PATH entry remade. A tool in use stays where it is until the next run.
 
-<img src="docs/images/desktop.webp" alt="The Desktop's icons: Recycle Bin, two Microsoft Edge shortcuts, the folders Accounts, Acquisition, Connected Devices, Event Logs, Execution, File Activity, Registry and System, and the shortcuts Timeline Explorer and Update forensic workstation">
+<img src="docs/images/desktop.webp" alt="The Desktop's icons: Recycle Bin, a Microsoft Edge shortcut, the folders File Activity, Other, Accounts, Persistence, Acquisition, Registry, Browsers, System, Connected Devices, Event Logs and Execution, and the shortcuts Timeline Explorer and Update forensic workstation">
 
 *The Desktop after a fresh build: a folder per category, Timeline Explorer
 and the script's own shortcut directly.*
+
+## Compatibility
+
+From 1.0.0, every 1.x release keeps these as they are. A 1.x may add to
+them (a parameter or a parameter value, a column at the end of a CSV, a
+field of a JSON record, a `Kind` or `Class` value); removing, renaming,
+reordering or changing the meaning of any of them is a new major version.
+
+- How it is run: `Update-ForensicWorkstation.ps1`, its parameters (the
+  tables under Usage), the environment variable
+  `FORENSIC_WORKSTATION_GITHUB_TOKEN` and its exit codes (0 PASS, 1 WARN, 2 FAIL, 3
+  stopped before any work; after a self-update, the new release's).
+- Where it puts things: the install tree
+  `%ProgramFiles%\ForensicTools\<Category>\<Tool>\` (`<Tool>` the
+  catalogue's name, e.g. `JumpListExplorer`), the script's own copy
+  `%ProgramFiles%\ForensicTools\Update-ForensicWorkstation.ps1`, the
+  shortcut names (`Update forensic workstation`, and each GUI tool's in
+  its category's folder), the records root
+  `%ProgramData%\ForensicWorkstation\` with `Runs\<UTC time>\run.log`
+  (`%LocalAppData%\ForensicWorkstation\` for a run without elevation) and
+  `Installers\`.
+- The records: the names and columns of `inventory.csv` and `files.csv`,
+  their `Kind`, `Owned`, `VendorHashMatched` and `Class` values, the date
+  format (`yyyy-MM-ddTHH:mm:ssZ`) and the bytes (UTF-8 without BOM, CRLF,
+  every cell quoted); `scheduled-run.json` with its fields; `state.json`
+  by its `SchemaVersion`: every 1.x reads what an earlier 1.x wrote (its
+  keys are the script's own and may change).
+- The console's `RESULT:` line (`RESULT: PASS`, `WARN` or `FAIL`, then
+  what it covers); no other console wording, and not the log's layout.
+- The scheduled update's task, `\ForensicWorkstation\Update forensic
+  workstation`, and its notifications' name, `ForensicWorkstation.Update`
+  under `HKCU\Software\Classes\AppUserModelId`: a 1.x finds, replaces and
+  removes what an earlier one set up.
+
+The catalogue is not part of it: a minor release may add, drop or move a
+tool, a family or a category (a moved tool's folder moves with it,
+nothing downloaded).
 
 ## What the output shows
 
@@ -345,12 +452,12 @@ update also writes, at the records folder's root and in the run's folder:
 
 | File | Holds |
 |---|---|
-| `inventory.csv` | Per tool, prerequisite version, ancillary set and the script's own installed copy: version, build, whether the script installed it, source URL, SHA-256 of the download, the vendor's hash and whether it matched, the signer, the change marker, the install time (UTC), the location |
-| `files.csv` | The SHA-256 of every file the script installed (its own installed copy included), vendor files and synced content apart |
+| `inventory.csv` | Per tool, prerequisite version, ancillary set and the script's own installed copy (`Kind`: `Tool`, `Prerequisite`, `Ancillary`, `Script`): version (a commit for ancillary content), build, whether the script installed it (`Owned`: `yes`, or `no` for a runtime or watched tool installed otherwise), source URL, SHA-256 of the download, the vendor's hash and whether it matched (`VendorHashMatched`: `yes`, or `not published`; a mismatch is never installed), the signer, the change marker, the install time (UTC), the location |
+| `files.csv` | The SHA-256 of every file the script installed (its own installed copy included), by `Class`: `Vendor`, `Ancillary` (synced content), `UserData` (kept and granted paths: listed, no length or SHA-256); `RelativePath` relative to the install root |
 | `state.json` | What the script installed and owns (what clean-up may remove) |
-| `scheduled-run.json` | The last scheduled run's start, end, exit code and log (written by that run; Task Scheduler sees only the console host's exit code) |
+| `scheduled-run.json` | The last scheduled run's start, end, script version, exit code, what it means (`PASS`, `WARN`, `FAIL` or `STOPPED`) and log (written by that run; Task Scheduler sees only the console host's exit code) |
 
-<img src="docs/images/inventory.webp" alt="Timeline Explorer with inventory.csv open: 50 lines, the columns Kind, Family, Category, Name and Version in view, one row per tool (AimCli, AmcacheParser, AppCompatCacheParser, AppCompatibilityView and the others)">
+<img src="docs/images/inventory.webp" alt="Timeline Explorer with inventory.csv open: 69 lines, the columns Kind, Family, Category, Name and Version in view, one row per tool (AimCli, AmcacheParser, AppCompatCacheParser, AppCrashView, AppResourcesUsageView, ArsenalImageMounter, Autoruns, Autorunsc, BootPerformanceView and the others)">
 
 *`inventory.csv` in Timeline Explorer (first columns).*
 
@@ -366,7 +473,7 @@ where that run left no record (with the next run). It never changes the
 verdict, except a scheduled update set up whose task has gone from Task
 Scheduler, a WARN.
 
-<img src="docs/images/end-of-update.webp" alt="Console: the result block of an update, RESULT: PASS for every tool in the catalogue, its prerequisites and ancillary content, then Script, Prerequisites 3 of 3, File Activity 15 of 15, Registry 4 of 4, Other 2 of 2, Execution 10 of 10, Event Logs 2 of 2, Accounts 2 of 2, Connected Devices (USBDeview 3.10 installed, unsigned), System 4 of 4, Acquisition 3 of 3, Ancillary content 3 of 3, PATH and shortcuts 2 of 2 PASS, the records written (inventory.csv 50 rows, files.csv 1468 rows), INFO Scheduled task: disabled, and the log's location">
+<img src="docs/images/end-of-update.webp" alt="Console: the result block of an update, RESULT: PASS for every tool in the catalogue, its prerequisites and ancillary content, then Script, Prerequisites 3 of 3, File Activity 14 of 14, Registry 6 of 6, Other 5 of 5, Execution 13 of 13, Event Logs 3 of 3, Accounts 2 of 2, Connected Devices 3 of 3, System 5 of 5, Browsers 3 of 3, Persistence 3 of 3, Acquisition 5 of 5, Ancillary content 3 of 3, PATH and shortcuts 2 of 2 PASS, the records written (inventory.csv 69 rows, files.csv 1640 rows), INFO Scheduled task: disabled, and the log's location">
 
 *The result block: the verdict and each group.*
 
@@ -397,6 +504,20 @@ else between runs beyond what `-Verify` finds.
 - It never removes the Visual C++ Redistributable or AIM's driver; Windows'
   driver store keeps each AIM driver package installed.
 - arm64 Windows is not supported.
+- Some downloads have no signature to check. Unsigned NirSoft builds and
+  SRUM-DUMP are installed on TLS and the vendor's hash or GitHub's digest
+  alone. DB Browser for SQLite publishes no hash: its two exes' signatures
+  are the check, and its DLLs aren't covered by one. The recorded SHA-256
+  of every file is the audit trail.
+- A watched tool's "current" comes from the vendor's web page over TLS,
+  with nothing signed behind it.
+- Velociraptor's `gui` is a local server with a login, reachable by every
+  process on the machine; its datastore is in your temporary folder. For a
+  case, run `velociraptor` from the PATH with a configuration of your own.
+- The records under `%ProgramData%\ForensicWorkstation\` are readable by
+  every account on the machine (only administrators can change them).
+- Self-update is the largest single trust it places: `-NoSelfUpdate` and
+  `$SelfUpdateRepository` are the controls.
 
 ## Contributing
 

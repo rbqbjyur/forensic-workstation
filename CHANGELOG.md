@@ -4,6 +4,86 @@ Notable changes to `Update-ForensicWorkstation.ps1`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.0.0 - 2026-10-29
+
+The first stable release: how it is run, its exit codes, the install tree,
+the records and the scheduled update's task stay as they are in every 1.x
+release (README, "Compatibility").
+
+### Added
+- Tools: BrowsingHistoryView, BrowserDownloadsView, ESEDatabaseView,
+  AppCrashView, WinLogOnView, WifiHistoryView, NetworkUsageView,
+  WinDefLogView, RegistryChangesView, UninstallView, DevManView,
+  BootPerformanceView, ShutdownPerformanceView, InstalledAppView,
+  InstalledPackagesView, WhatInStartup, USBDriveLog, MyLastSearch and
+  RegFileExport (NirSoft; RegFileExport a console tool on the PATH);
+  Velociraptor (a shortcut that runs `velociraptor.exe gui`,
+  and `velociraptor` on the PATH); DB Browser for SQLite (family
+  `sqlitebrowser`, both its exes' signers checked).
+- Categories Commands, Persistence, Lateral Movement and Browsers (a
+  category with no tool has no folder).
+- Catalogue field `InitialSettings`: each NirSoft tool starts with the
+  settings for collected artefacts (times in UTC, no time filter, a header
+  line in exports), written into its `.cfg` while the file is new or
+  empty; a `.cfg` the tool has saved is left as it is. Their rows'
+  fingerprints change, so each NirSoft tool is reinstalled once.
+- Watched tools: FTK Imager and DCode, which have installers of their
+  own, are never installed; where one is, a newer version out is a WARN
+  with the vendor's page (opened by an update run, a notification from a
+  scheduled one), and the inventory lists it as not installed by the
+  script.
+- Catalogue fields `InstalledFileName` (a single-file download named for
+  its version; a `.gz` download is decompressed, and refused unless its
+  length is the one its gzip trailer records) and `GuiArguments`; a
+  `version` group in `AssetPattern` takes the highest of a release's
+  assets; `VersionPage` sources take `HighestVersion` and
+  `VersionSeparator`; `OtherExes`, exes whose signer is checked beside the
+  entry points.
+- `scheduled-run.json` records the script version and what the exit code
+  means (`Version`, `Overall`).
+- An optional GitHub token, from the environment variable
+  `FORENSIC_WORKSTATION_GITHUB_TOKEN`: GitHub's limit rises from 60 calls
+  an hour to 5,000. Sent only to GitHub's API, written nowhere; the header
+  says whether the run has one; a token GitHub refuses is a WARN on every
+  GitHub check.
+
+### Changed
+- Categories as in my notes on Windows artefacts: Autoruns and autorunsc
+  move to Persistence, WxTCmd to Other; an update run moves their folders,
+  shortcuts and PATH entries.
+- Rows that install from one file (Autoruns and autorunsc, SRUM-DUMP's,
+  Velociraptor's and Arsenal Image Mounter's two rows) download it once per
+  run; a later row re-hashes the staged copy.
+- An adapted copy's catalogue row without `AssetPattern` (a GitHub row),
+  a `VersionPage` source without `PageUrl` or `VersionPattern`, or a
+  watched row without `InstalledNamePattern` stops the run before any work:
+  an empty pattern matches everything. So does a row whose
+  `InitialSettings` have no single `.cfg` to go in, or a line that isn't
+  `Key=Value`.
+- A declined UAC prompt is recognised by Windows' error code, not its
+  English message.
+- A full run makes about nine GitHub calls (about six before): Velociraptor
+  and DB Browser for SQLite are released there. A repository's release
+  list that can't be read is asked for once per run, not once per row
+  that uses it.
+- A newer release of the script is installed, and takes over the run,
+  straight after the script's own check, before any other source is
+  checked: the new release checks them itself (before, the old version
+  checked every source first, then handed over to a release that checked
+  them all again).
+- The header's OS line names the OS without its architecture
+  ("Microsoft Windows 11 Enterprise 24H2", not "... (X64)"); the script
+  still runs on amd64 only.
+
+### Removed
+- AppCompatibilityView, UserAssistView and UserProfilesView (NirSoft): they
+  read only the running system, not collected artefacts. An update run
+  without selection removes them.
+
+### Fixed
+- `-WhatIf` printed a dozen "What if: ... Set Alias" lines before its own
+  (since 0.3.0: the CIM module loaded before the mode was settled).
+
 ## 0.6.0 - 2026-10-28
 
 ### Added
