@@ -4,6 +4,21 @@ Notable changes to `Update-ForensicWorkstation.ps1`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.0.1 - 2026-11-14
+
+### Fixed
+- `-Family`, `-Category` or `-Tool` with an empty name (`-Tool ''`, `-Tool ','`,
+  `-Tool 'a,,b'`, a variable holding nothing) stops before any work (exit 3);
+  before, it left the selection empty and ran a full update, clean-up
+  included.
+- A command-line tool whose folder can't be listed is not put on the PATH (a
+  FAIL naming the tool): a clash of exe names can't be ruled out. Before, the
+  listing's error was ignored and the folder added.
+- The README (its introduction and "What it does") and the script's help no
+  longer say every download, or every exe, is checked against a signer:
+  only where the vendor signs it (the README's "What it does not do" lists
+  the exceptions).
+
 ## 1.0.0 - 2026-10-29
 
 The first stable release: how it is run, its exit codes, the install tree,

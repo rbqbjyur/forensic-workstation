@@ -25,7 +25,7 @@
 
     Every download is hashed (SHA-256), checked against the vendor's
     published hash where there is one and against the vendor's Authenticode
-    signer, and recorded. The script only ever removes what it installed
+    signer where the vendor signs it, and recorded. The script only ever removes what it installed
     itself (recorded in state.json). Records are written under
     ProgramData\ForensicWorkstation\: a log per run, inventory.csv (what is
     installed, from where, with which hashes) and files.csv (SHA-256 of
@@ -46,7 +46,9 @@
 
 .PARAMETER Family
     Limits the run to the tools of these families (and the prerequisites
-    they need). A run with -Family, -Category or -Tool removes nothing.
+    they need). A run with -Family, -Category or -Tool removes nothing. Each
+    takes one or more names, separated by commas; an empty name (-Tool '')
+    stops the run before any work.
 
 .PARAMETER Category
     Limits the run to the tools of these categories (and the prerequisites
@@ -142,7 +144,7 @@ param(
 
 # ============================== CONFIG ==============================
 
-$WorkstationVersion = '1.0.0'
+$WorkstationVersion = '1.0.1'
 
 # No script-wide error suppression: every unit of work has its own try/catch.
 # Progress bars are off: Invoke-WebRequest in PowerShell 5.1 is many times
@@ -4127,13 +4129,17 @@ function Update-MachinePath {
         if (@($catalogueTool.Cli).Count -eq 0 -or -not $State.Tools.ContainsKey($catalogueTool.Name)) { continue }
         if (Test-ToolFolderWritable -CatalogueTool $catalogueTool) { $refused.Add("$($catalogueTool.Name): its folder is writable by the account, so it is never put on PATH"); continue }
         $folder = Get-ToolInstalledFolder -Record $State.Tools[$catalogueTool.Name]
+        # A folder that can't be listed can't be checked for a clash: it is
+        # refused (unknown is not "no clash").
+        try { $folderExes = @(Get-ChildItem -LiteralPath $folder -Filter '*.exe' -File -ErrorAction Stop) }
+        catch { $refused.Add("$($catalogueTool.Name): not put on PATH, its folder can't be listed ($(Get-OneLineMessage -ErrorRecord $_)), so a clash of exe names can't be ruled out"); continue }
         $clash = $null
-        foreach ($exe in @(Get-ChildItem -LiteralPath $folder -Filter '*.exe' -File -ErrorAction SilentlyContinue)) {
+        foreach ($exe in $folderExes) {
             $exeName = $exe.Name.ToLowerInvariant()
             if ($exeOwners.ContainsKey($exeName)) { $clash = "$($exe.Name) is also in $($exeOwners[$exeName])"; break }
         }
         if ($clash) { $refused.Add("$($catalogueTool.Name): not put on PATH, $clash"); continue }
-        foreach ($exe in @(Get-ChildItem -LiteralPath $folder -Filter '*.exe' -File -ErrorAction SilentlyContinue)) { $exeOwners[$exe.Name.ToLowerInvariant()] = $catalogueTool.Name }
+        foreach ($exe in $folderExes) { $exeOwners[$exe.Name.ToLowerInvariant()] = $catalogueTool.Name }
         $wanted.Add($folder)
     }
 
@@ -4684,10 +4690,23 @@ if ($dryRun) { $mode = 'dry run (nothing is changed)' }
 if ($Verify) { $mode = 'verify (re-hash installed files)' }
 if ($ScheduledUpdate -eq 'Enable') { $mode = 'scheduled update: set it up (nothing else is changed)' }
 if ($ScheduledUpdate -eq 'Disable') { $mode = 'scheduled update: remove it (nothing else is changed)' }
+# A selection names what it is for: a selection parameter given with no
+# name, or with an empty name ('', ',', 'a,,b', a variable holding nothing),
+# would leave the selection empty and make the run a full update, clean-up
+# included, so it stops here.
+$emptySelections = @(foreach ($selectionParameter in @('Family', 'Category', 'Tool')) {
+        if (-not $PSBoundParameters.ContainsKey($selectionParameter)) { continue }
+        $selectionNames = @(@($PSBoundParameters[$selectionParameter]) | ForEach-Object { "$_" -split ',' })
+        if ($selectionNames.Count -eq 0 -or @($selectionNames | Where-Object { -not $_.Trim() }).Count -gt 0) { "-$selectionParameter" }
+    })
+if ($emptySelections.Count -gt 0) {
+    foreach ($line in @(Format-WrappedText -Text "Stopped: an empty name in $($emptySelections -join ', '). Give each name, separated by commas, or leave the parameter out to update every tool.")) { Write-Host $line }
+    Exit-Run -Code 3
+}
 # A selection typed at a prompt arrives as an array; one passed through
 # -File (the shortcut, a relaunch) as one string, "a,b": each value is split
 # on commas, so both forms select the same.
-$Family = @($Family | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$Family =@($Family | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $Category = @($Category | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $Tool = @($Tool | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $selectionGiven = ($Family.Count -gt 0 -or $Category.Count -gt 0 -or $Tool.Count -gt 0)

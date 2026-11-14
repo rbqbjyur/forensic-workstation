@@ -13,8 +13,8 @@ Velociraptor, DB Browser for SQLite and Arsenal Image Mounter with its
 driver, with the .NET runtimes and Visual C++ Redistributable they need;
 FTK Imager and DCode, which have installers of their own, are watched for
 new versions where installed. Every download is hashed, checked against the
-vendor's published hash and signer, and recorded, so the tool versions
-behind an analysis can be cited later.
+vendor's published hash and signer where the vendor provides them, and
+recorded, so the tool versions behind an analysis can be cited later.
 
 The selection is mine. Use it as it is, or adapt it: adding or
 dropping a tool is a row in a table, and another vendor's set needs only a
@@ -63,7 +63,8 @@ for four seconds.
   `-Verify` reports the same.
 - Verifies every download: SHA-256, the vendor's published hash where there
   is one (.NET, Arsenal Image Mounter, the Visual C++ Redistributable, AIM's
-  driver package), the Authenticode signer of every exe it installs, AIM's
+  driver package), the Authenticode signer of each exe the catalogue names
+  where the vendor signs it (exceptions under "What it does not do"), AIM's
   driver against its Microsoft-signed catalogue, and a
   re-read of every extracted file before it is used. An update is swapped in
   only when all of that passes; a tool running from its folder is left as it
@@ -161,7 +162,7 @@ Unblock-File .\Update-ForensicWorkstation-*.ps1
 | `-Verify` | Re-hashes the installed files against `files.csv` and lists files missing, changed or not on record; a tool on record in `state.json` with no files in `files.csv` is a FAIL. No network access. |
 | `-Family` | Limits the run to these families (where the tools come from): `Zimmerman`, `NirSoft`, `Sysinternals`, `Arsenal`, `SRUM-DUMP`, `Velocidex`, `sqlitebrowser`. |
 | `-Category` | Limits the run to these categories (what the tools examine; the table below). A name may be given without its spaces: `-Category FileActivity`. |
-| `-Tool` | Limits the run to these tools (names as in the catalogue). |
+| `-Tool` | Limits the run to these tools (names as in the catalogue). `-Family`, `-Category` and `-Tool` each take one or more names, separated by commas; an empty name (`-Tool ''`) stops the run before any work. |
 | `-Pause` | Keeps the window open at the end, for a run started from a shortcut (the script's own shortcut passes it; a run started from Explorer pauses anyway). |
 | `-NoSelfUpdate` | Runs this copy as it is, without checking for a newer release. The run handed over after a self-update uses it. |
 | `-ScheduledUpdate` | `Enable` sets up the scheduled update (below), `Disable` removes it; nothing else is done in that run. |
