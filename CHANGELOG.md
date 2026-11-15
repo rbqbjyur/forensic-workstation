@@ -1,8 +1,28 @@
 # Changelog
 
-Notable changes to `Update-ForensicWorkstation.ps1`. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Notable changes to fuligin, `Update-ForensicWorkstation.ps1`. The format
+follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
+project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## 1.1.0 - 2026-11-15
+
+The project is now called fuligin, its repository `rbqbjyur/fuligin`. The
+script keeps its name, `Update-ForensicWorkstation.ps1`, and nothing in
+"Compatibility" changes.
+
+### Added
+- Self-update also takes a release whose script is `fuligin.ps1` or
+  `fuligin-<version>.ps1`, with the notes' line ``SHA-256 of `fuligin.ps1`:``,
+  so a 1.x from 1.1.0 finds a release under the project's name.
+- A banner above the console's header: not on a scheduled run or when
+  standard output is redirected, and never in the run log.
+
+### Changed
+- Self-update looks at `rbqbjyur/fuligin`, the repository's new name (1.0.x
+  reach it through GitHub's redirect from the old one).
+- The header's title line is `fuligin 1.1.0: forensic workstation update`
+  (before, `Forensic workstation update 1.0.1`).
+- The README and the script's help name the project fuligin.
 
 ## 1.0.1 - 2026-11-14
 

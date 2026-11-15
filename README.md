@@ -1,9 +1,22 @@
-# forensic-workstation
+# fuligin
+
+```text
+       .
+     .###.
+    ##' '##        _____   _   _   _       ___    ____   ___   _   _
+   ##'   '##      |  ___| | | | | | |     |_ _|  / ___| |_ _| | \ | |
+   ##     ##      | |_    | | | | | |      | |  | |  _   | |  |  \| |
+   ##.   .##      |  _|   | |_| | | |___   | |  | |_| |  | |  | |\  |
+  ####. .####     |_|      \___/  |_____| |___|  \____| |___| |_| \_|
+ ######o######
+####### #######   forensic workstation, built and kept current
+######   ######
+```
 
 My own set-up of the common Windows forensic tools, shared as it is: one
-Windows PowerShell script that installs them on a fresh DFIR workstation and
-keeps them current, downloading only what has changed since the last run and
-removing what is no longer needed.
+Windows PowerShell script, `Update-ForensicWorkstation.ps1`, that installs
+them on a fresh DFIR workstation and keeps them current, downloading only
+what has changed since the last run and removing what is no longer needed.
 
 It isn't a forensic suite. It keeps the many small standalone tools up to
 date, so the workstation is ready before an investigation: Eric Zimmerman's
@@ -448,7 +461,7 @@ nothing downloaded).
 
 Each run writes `Runs\<UTC time>\run.log` under the records folder (a dry run
 or `-Verify` without elevation writes under `%LocalAppData%` instead): what
-the console shows, with the address of every download. An
+the console shows bar the banner, with the address of every download. An
 update also writes, at the records folder's root and in the run's folder:
 
 | File | Holds |

@@ -1,11 +1,23 @@
 # SPDX-License-Identifier: 0BSD
 #Requires -Version 5.1
 
+#        .
+#      .###.
+#     ##' '##        _____   _   _   _       ___    ____   ___   _   _
+#    ##'   '##      |  ___| | | | | | |     |_ _|  / ___| |_ _| | \ | |
+#    ##     ##      | |_    | | | | | |      | |  | |  _   | |  |  \| |
+#    ##.   .##      |  _|   | |_| | | |___   | |  | |_| |  | |  | |\  |
+#   ####. .####     |_|      \___/  |_____| |___|  \____| |___| |_| \_|
+#  ######o######
+# ####### #######   forensic workstation, built and kept current
+# ######   ######
+
 <#
 .SYNOPSIS
-    Builds a forensic workstation from fresh and keeps it current: installs
-    the forensic tools in its catalogue and the prerequisites they need,
-    downloads only what has changed, and removes what is no longer needed.
+    fuligin: builds a forensic workstation from fresh and keeps it current.
+    It installs the forensic tools in its catalogue and the prerequisites
+    they need, downloads only what has changed, and removes what is no
+    longer needed.
 
 .DESCRIPTION
     One run does everything: on a fresh machine it installs every tool; later
@@ -144,7 +156,7 @@ param(
 
 # ============================== CONFIG ==============================
 
-$WorkstationVersion = '1.0.1'
+$WorkstationVersion = '1.1.0'
 
 # No script-wide error suppression: every unit of work has its own try/catch.
 # Progress bars are off: Invoke-WebRequest in PowerShell 5.1 is many times
@@ -162,6 +174,24 @@ $ConsoleWidth = 80
 $UnbreakableSpace = [char]0x1F
 $PlanActionWidth = 10       # the plan's action column ("Reinstall" and a space)
 $CheckNameWidth = 24        # the name column of the check lines; a longer name has its line to itself
+
+# The banner, shown above the header of a run someone watches: never a
+# scheduled run, never when the process's standard output is redirected,
+# never in the run log (the header's title line names the version there).
+# PowerShell's own redirection of the host's text (6>, *>) takes it along
+# with every other console line. {version}: this script's.
+$ConsoleBanner = @'
+       .
+     .###.
+    ##' '##        _____   _   _   _       ___    ____   ___   _   _
+   ##'   '##      |  ___| | | | | | |     |_ _|  / ___| |_ _| | \ | |
+   ##     ##      | |_    | | | | | |      | |  | |  _   | |  |  \| |
+   ##.   .##      |  _|   | |_| | | |___   | |  | |_| |  | |  | |\  |
+  ####. .####     |_|      \___/  |_____| |___|  \____| |___| |_| \_|
+ ######o######
+####### #######   v{version} - forensic workstation, built and kept current
+######   ######
+'@
 
 # Network: every request has a timeout; the system proxy of the running
 # account is used (Invoke-WebRequest's default).
@@ -664,9 +694,14 @@ $ProcessorArchitectureRegistryNames = @{ 'AMD64' = 'X64'; 'ARM64' = 'Arm64'; 'x8
 # own SHA-256 is the one published for its version updates itself: an
 # adapted copy never is overwritten. An adapted copy sets the repository
 # to '' (self-update off) or to its own.
-$SelfUpdateRepository = 'rbqbjyur/forensic-workstation'
-$SelfUpdateAssetPattern = '^Update-ForensicWorkstation(-\d+(\.\d+)*)?\.ps1$'
-$SelfUpdateNotesHashPattern = 'SHA-256 of `Update-ForensicWorkstation\.ps1`: `([0-9a-fA-F]{64})`'
+# The script's file has one of two names: Update-ForensicWorkstation.ps1
+# (every release before 2.0.0) and fuligin.ps1 (the project's name, from
+# 2.0.0).
+# Both are accepted, in the asset and in the notes' line, so a 1.x finds
+# a release under either. The notes' line is matched case-sensitively.
+$SelfUpdateRepository = 'rbqbjyur/fuligin'
+$SelfUpdateAssetPattern = '^(?:Update-ForensicWorkstation|fuligin)(-\d+(\.\d+)*)?\.ps1$'
+$SelfUpdateNotesHashPattern = 'SHA-256 of `(?:Update-ForensicWorkstation|fuligin)\.ps1`: `([0-9a-fA-F]{64})`'
 # The protected copy: this script under the install root (Program Files,
 # writable by administrators only), which the shortcut runs. A copy run
 # from anywhere else (Downloads) installs or refreshes it.
@@ -799,6 +834,14 @@ function Write-RawLine {
     $Text = $Text.Replace($script:UnbreakableSpace, ' ')
     if ($Colour -and $script:useColour) { Write-Host $Text -ForegroundColor $Colour } else { Write-Host $Text }
     Add-LogLine -Text $Text
+}
+
+# Print the banner ($ConsoleBanner) with this script's version, and a
+# blank line under it. Console only: it is never kept in the run log.
+function Write-ConsoleBanner {
+    param([string]$Version)
+    foreach ($line in ($script:ConsoleBanner -split '\r?\n')) { Write-Host $line.Replace('{version}', $Version) }
+    Write-Host ''
 }
 
 # Print text, wrapped, and keep it in the run log.
@@ -4746,8 +4789,11 @@ $logUnderRecords = $elevated -and (-not $readOnlyMode -or [System.IO.Directory]:
 $runFolder = Join-Path $recordsRoot "Runs\$runStamp"
 if (-not $logUnderRecords) { $runFolder = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) "$RecordsFolderName\Runs\$runStamp" }
 
+# The banner only where someone watches the console (see $ConsoleBanner).
+$showConsoleBanner = (-not $Scheduled) -and (-not [Console]::IsOutputRedirected)
+if ($showConsoleBanner) { Write-ConsoleBanner -Version $WorkstationVersion }
 Write-ConsoleLine -Text ('=' * $ConsoleWidth)
-Write-ConsoleLine -Text "Forensic workstation update $WorkstationVersion"
+Write-ConsoleLine -Text "fuligin ${WorkstationVersion}: forensic workstation update"
 Write-ConsoleLine -Text ('=' * $ConsoleWidth)
 Write-LabelValue -Label 'Started' -Value (Format-UtcTime -Time $runStartUtc)
 Write-LabelValue -Label 'Host' -Value $env:COMPUTERNAME
